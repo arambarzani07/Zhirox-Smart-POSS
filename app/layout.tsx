@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import "./no-pin.css";
 
 export const metadata: Metadata = {
   title: "Zhirox Smart POS",
