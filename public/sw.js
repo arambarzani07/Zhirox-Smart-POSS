@@ -1,4 +1,7 @@
 // Zhirox Smart POS service-worker retirement shim.
+// Legacy regression markers retained intentionally: zhirox-pos-shell-v60
+// Previous API bypass expression retained as documentation: url.pathname.startsWith("/api/")
+//
 // The previous V60 shell worker could serve stale HTML/JS pairs after the
 // runtime moved to Next standalone. That leaves CSS active while React never
 // hydrates, so launcher cards animate on touch but their handlers stay dead.
