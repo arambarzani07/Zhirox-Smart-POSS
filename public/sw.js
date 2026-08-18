@@ -1,31 +1,30 @@
-const CACHE_NAME = "zhirox-pos-shell-v60";
-const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/data/supermarket-zhirox-import.csv"];
+// Zhirox Smart POS service-worker retirement shim.
+// The previous V60 shell worker could serve stale HTML/JS pairs after the
+// runtime moved to Next standalone. That leaves CSS active while React never
+// hydrates, so launcher cards animate on touch but their handlers stay dead.
+// Existing registrations will discover this script during the browser's normal
+// service-worker update check, purge the legacy caches and unregister themselves.
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
   self.skipWaiting();
+  event.waitUntil(Promise.resolve());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
-    ),
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key.startsWith("zhirox-pos-shell-")).map((key) => caches.delete(key)));
+    await self.registration.unregister();
+    const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const client of clients) {
+      try {
+        await client.navigate(client.url);
+      } catch {
+        // A client can disappear while the worker is retiring; ignore it.
+      }
+    }
+  })());
 });
 
-self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") return;
-  const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-        return response;
-      })
-      .catch(() => caches.match(event.request).then((cached) => cached ?? caches.match("/"))),
-  );
-});
+// Never intercept fetches while this retirement worker is active.
+self.addEventListener("fetch", () => {});
