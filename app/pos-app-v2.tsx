@@ -30,7 +30,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { Component, useCallback, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useMemo, useState, type ErrorInfo, type MouseEvent, type ReactNode } from "react";
 import {
   countStores,
   ensureJournalOpeningSnapshot,
@@ -114,6 +114,11 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("ckb-IQ").format(value);
 }
 
+function moduleForKey(key: string | null | undefined) {
+  if (!key) return null;
+  return modules.find((module) => module.key === key && !module.hidden) ?? null;
+}
+
 class ModuleErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
 
@@ -140,11 +145,11 @@ class ModuleErrorBoundary extends Component<{ children: ReactNode }, { error: Er
   }
 }
 
-export default function PosAppV2() {
+export default function PosAppV2({ initialModuleKey }: { initialModuleKey?: string | null }) {
   const [dbReady, setDbReady] = useState(false);
   const [counts, setCounts] = useState<StoreCounts>(emptyCounts);
   const [settings, setSettings] = useState<PosSettings | null>(null);
-  const [activeModule, setActiveModule] = useState<ModuleDefinition | null>(null);
+  const [activeModule, setActiveModule] = useState<ModuleDefinition | null>(() => moduleForKey(initialModuleKey));
   const [online, setOnline] = useState(true);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncState, setSyncState] = useState<PosSyncResult>(initialSyncState);
@@ -166,9 +171,6 @@ export default function PosAppV2() {
     window.addEventListener("online", updateOnline);
     window.addEventListener("offline", updateOnline);
 
-    // The previous runtime registered a shell service worker. During the move to
-    // Next standalone it can leave old HTML/JS pairs behind and prevent React
-    // hydration, which makes buttons animate but leaves onClick handlers dead.
     if ("serviceWorker" in navigator) {
       void navigator.serviceWorker.getRegistrations().then((registrations) =>
         Promise.all(registrations.map((registration) => registration.unregister())),
@@ -196,15 +198,35 @@ export default function PosAppV2() {
     };
   }, [refreshCounts]);
 
+  useEffect(() => {
+    setActiveModule(moduleForKey(initialModuleKey));
+  }, [initialModuleKey]);
+
   const openModule = useCallback((key: ModuleKey) => {
-    const selected = modules.find((module) => module.key === key && !module.hidden);
+    const selected = moduleForKey(key);
     if (!selected) return;
-    // Navigation is deliberately independent from PIN, sync, DB readiness,
-    // operator state, localStorage and permissions. A valid launcher always opens.
     setActiveModule(selected);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", `/?module=${encodeURIComponent(key)}`);
+    }
   }, []);
 
-  const closeModule = useCallback(() => setActiveModule(null), []);
+  const closeModule = useCallback(() => {
+    setActiveModule(null);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", "/");
+  }, []);
+
+  const openModuleFromLink = useCallback((event: MouseEvent<HTMLAnchorElement>, key: ModuleKey) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    openModule(key);
+  }, [openModule]);
+
+  const closeFromLink = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    closeModule();
+  }, [closeModule]);
 
   const handleDataChanged = useCallback(async () => {
     await refreshCounts();
@@ -243,7 +265,7 @@ export default function PosAppV2() {
   }, [online, syncState]);
 
   return (
-    <main className="pos-shell">
+    <main className="pos-shell" data-navigation-version="native-v3">
       <header className="topbar">
         <div className="brand-lockup video-brand">
           <span className="brand-mark" aria-hidden="true"><Store size={21} /></span>
@@ -270,18 +292,18 @@ export default function PosAppV2() {
             const Icon = module.icon;
             const count = module.countStore ? counts[module.countStore] : null;
             return (
-              <button
-                type="button"
+              <a
+                href={`/?module=${encodeURIComponent(module.key)}`}
                 className={`module-card tone-${module.tone}`}
                 key={module.key}
                 data-module-key={module.key}
                 aria-label={`کردنەوەی ${module.title}`}
-                onClick={() => openModule(module.key)}
+                onClick={(event) => openModuleFromLink(event, module.key)}
               >
                 <span className="module-icon"><Icon size={28} strokeWidth={1.65} /></span>
                 <span className="module-copy"><strong>{module.title}</strong><small>{module.description}</small></span>
                 {count !== null && count > 0 && <span className="module-count">{formatNumber(count)}</span>}
-              </button>
+              </a>
             );
           })}
         </section>
@@ -289,14 +311,14 @@ export default function PosAppV2() {
 
       {activeModule && (
         <div className="module-overlay" role="dialog" aria-modal="true" aria-label={activeModule.title}>
-          <button className="overlay-scrim" type="button" aria-label="داخستن" onClick={closeModule} />
+          <a className="overlay-scrim" href="/" aria-label="داخستن" onClick={closeFromLink} />
           <section className="module-drawer">
             <header className={`drawer-head tone-${activeModule.tone}`}>
               <div className="drawer-title">
                 <span>{(() => { const Icon = activeModule.icon; return <Icon size={26} />; })()}</span>
                 <div><h2>{activeModule.title}</h2><p>{activeModule.description}</p></div>
               </div>
-              <button type="button" className="close-button" onClick={closeModule} aria-label="داخستن"><X size={22} /></button>
+              <a href="/" className="close-button" onClick={closeFromLink} aria-label="داخستن"><X size={22} /></a>
             </header>
             <div className="drawer-body">
               <ModuleErrorBoundary key={activeModule.key}>
