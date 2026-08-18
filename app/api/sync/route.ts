@@ -9,7 +9,7 @@ import {
   SyncMergeConflictError,
 } from "@/db/sync-store";
 import { authenticatedSingleMarketActor } from "@/db/auth-store";
-import { apiSecurityHeaders, apiSecurityResponse, requireAuthenticatedIdentity, requireTrustedMutationRequest } from "@/lib/request-security";
+import { apiSecurityHeaders, apiSecurityResponse, readBoundedJsonObject, requireAuthenticatedIdentity, requireTrustedMutationRequest } from "@/lib/request-security";
 import { SYNC_STORE_NAMES, type CloudSyncChange } from "@/lib/sync-contract";
 
 export const dynamic = "force-dynamic";
@@ -70,27 +70,13 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   let actor;
+  let body: Record<string, unknown>;
   try {
     requireTrustedMutationRequest(request);
     actor = await authenticatedActor(request);
+    body = await readBoundedJsonObject(request, 1_500_000);
   } catch (error) {
     return accessFailure(error);
-  }
-
-  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
-  if (contentType !== "application/json") return json({ error: "CONTENT_TYPE_JSON_REQUIRED" }, 415);
-  const lengthHeader = request.headers.get("content-length");
-  if (lengthHeader) {
-    const length = Number(lengthHeader);
-    if (!Number.isFinite(length) || length < 0) return json({ error: "INVALID_CONTENT_LENGTH" }, 400);
-    if (length > 1_500_000) return json({ error: "SYNC_PAYLOAD_TOO_LARGE" }, 413);
-  }
-
-  let body: Record<string, unknown>;
-  try {
-    body = await request.json() as Record<string, unknown>;
-  } catch {
-    return json({ error: "INVALID_JSON" }, 400);
   }
 
   const action = body.action;
