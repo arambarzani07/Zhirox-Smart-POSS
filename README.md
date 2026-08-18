@@ -1,108 +1,61 @@
-# vinext-starter
+# Zhirox Smart POS
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Zhirox Smart POS is a single-market, Kurdish Sorani RTL point-of-sale system with offline-first browser storage, Cloudflare D1-backed synchronization, production restore points, stock, sales, purchases, cash, customer/supplier balances, accounting records, barcode workflows, and role-aware cloud synchronization.
 
-## Prerequisites
+## Runtime requirements
 
-- Node.js `>=22.13.0`
-- Linux with `flock`, `curl`, and GNU `timeout`
+- Node.js `>=22.15.0`
+- Linux-compatible build environment with `bash`, `flock`, `curl`, and GNU `timeout`
+- Cloudflare/OpenAI Sites runtime with D1 binding named `DB`
+- Trusted hosting identity headers for protected cloud APIs
 
-## Sites Lifecycle
+## Production owner configuration
 
-The Sites lifecycle CLI runs the locked dependency install before returning this checkout. Edit the source under `app/`, then checkpoint when a coherent milestone is ready to inspect or share. The remote Sites builder runs `npm run build` against the pushed commit. Do not repeat install or build as a normal pre-checkpoint step.
+Production must define `ZHIROX_OWNER_EMAIL` in the server/runtime environment. This value is the canonical owner identity for the single-market installation. Do not commit it to Git and do not expose it to browser code.
 
-This starter does not use `wrangler.jsonc`.
+The server resolves authenticated identities against persisted `pos_staff` rows. Unknown or inactive staff fail closed. The configured owner is reconciled to the single active owner identity, and stale active owner rows are disabled during owner rotation.
 
-`install:ci` is intentionally a single, non-retrying `npm ci`. It refuses a concurrent install for the same project, consumes a matching image-seeded npm cache with `--prefer-offline` while retaining registry fallback for a missing cache object, otherwise downloads and verifies the complete vinext tarball recorded in `package-lock.json`, limits npm to one socket, and terminates a stalled install. `build` applies a short timeout and then validates the Sites artifact. These helpers target Linux and use GNU `timeout`; they are not native macOS scripts.
+## Security boundary
 
-Scripts that need writable project-scoped home, npm, XDG, and temporary paths use `scripts/sites-env.sh`. The `dev` and `start` scripts honor the caller's runtime environment and keep Wrangler logs inside the checkout. The generated `.sites-runtime/` directory is disposable and ignored by Git.
+`/api/sync` and `/api/production` are server-protected endpoints. They require trusted dispatch identity, reject untrusted cross-origin/cross-site mutations, enforce JSON/body-size limits, and never trust client-submitted role or tenant metadata. Cloud restore is owner-only.
 
-## Included Shape
+Cashier and accountant cloud scopes do not receive the `users` store because user records contain credential-derived data such as `pinHash`. See `SECURITY.md` for the production security baseline.
 
-- edit site code under `app/`
-- `app/chatgpt-auth.ts` provides optional dispatch-owned ChatGPT sign-in helpers
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+## Development
 
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+npm ci
+npm run dev
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+## Validation
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+Run the same core quality gates used by CI:
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run validate:artifact
+npm audit --omit=dev --audit-level=high
+```
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+`npm test` performs the verified build before running the Node test suite.
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+## Database and hosting
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+The repository uses Drizzle tooling and Cloudflare D1. `.openai/hosting.json` declares the D1 binding used by the hosted application. `drizzle.config.ts` is available for local migration generation.
 
-## Diagnostic Commands
+```bash
+npm run db:generate
+```
 
-- `npm run install:ci`: perform the one bounded lockfile install
-- `npm run dev`: start the Vite/Vinext development server
-- `npm run build`: build and validate the deployable Sites artifact
-- `npm run start`: start the built Vinext application
-- `npm test`: build, validate, and verify the rendered development-preview metadata
-- `npm run validate:artifact`: recheck an existing artifact's manifest and ESM `default.fetch` export
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+## Architecture notes
 
-Use build and validation commands for targeted diagnosis after a remote failure, not as part of the normal checkpoint path.
+- `app/` — UI and protected API routes
+- `lib/` — POS domain logic, local database/sync contracts, security helpers
+- `db/` — Cloudflare D1 synchronization and server authorization stores
+- `tests/` — financial, barcode, sync, rendered UI, authorization, and role-scope regression tests
+- `.github/workflows/ci.yml` — lint/typecheck/build/test/artifact/audit merge gate
 
-The timeout defaults can be overridden for a controlled canary with `SITES_INSTALL_TIMEOUT`, `SITES_INSTALL_KILL_AFTER`, `SITES_BUILD_TIMEOUT`, and `SITES_BUILD_KILL_AFTER`. A timeout fails the command; the helpers never retry an unchanged install or build.
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+The cashier UX remains single-market; tenant and role authority are server-side concerns and are never selected by the browser.
