@@ -13,7 +13,9 @@ test("server identity is fail-closed and cannot self-assign owner role", async (
   assert.match(authStore, /OWNER_EMAIL_NOT_CONFIGURED/);
   assert.match(authStore, /STAFF_ACCESS_DENIED/);
   assert.match(authStore, /role = 'owner'/);
-  assert.match(authStore, /identity\.email !== configuredOwnerEmail\(\)/);
+  assert.match(authStore, /identity\.email === ownerEmail/);
+  assert.match(authStore, /identity\.email !== ownerEmail/);
+  assert.match(authStore, /ensureConfiguredOwner\(identity, actorId\)/);
   assert.doesNotMatch(authStore, /role:\s*identity\./);
   assert.doesNotMatch(authStore, /tenantId:\s*identity\./);
 
