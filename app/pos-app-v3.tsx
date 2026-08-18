@@ -1,5 +1,7 @@
 "use client";
 
+import dynamic from "next/dynamic";
+import { indexedDB as memoryIndexedDB, IDBKeyRange as MemoryIDBKeyRange } from "fake-indexeddb";
 import {
   ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, BadgeDollarSign, Barcode, Boxes,
   ChartNoAxesCombined, CircleHelp, CloudUpload, Fingerprint, HandCoins, Handshake,
@@ -9,7 +11,12 @@ import {
 import { Component, useCallback, useEffect, useMemo, useState, type ErrorInfo, type MouseEvent, type ReactNode } from "react";
 import { countStores, ensureJournalOpeningSnapshot, getRecord, openPosDatabase, type PosSettings, type StoreCounts } from "@/lib/pos-db";
 import { DEFAULT_CASHIER_PERMISSIONS } from "@/lib/device-security";
-import ModuleWorkspace, { type OwnerApprovalDecision, type WorkspaceModuleKey } from "./module-workspace";
+import type { OwnerApprovalDecision, WorkspaceModuleKey } from "./module-workspace";
+
+const ModuleWorkspace = dynamic(() => import("./module-workspace"), {
+  ssr: false,
+  loading: () => <div className="workspace-loading"><span /><p>بارکردنی بەش...</p></div>,
+});
 
 type Tone = "amber" | "violet" | "red" | "charcoal" | "slate";
 type ModuleKey = WorkspaceModuleKey;
@@ -62,20 +69,42 @@ function moduleForKey(key: string | null | undefined) {
 function isEmbeddedPreview() {
   if (typeof window === "undefined") return false;
   try {
-    return window.self !== window.top || document.referrer.includes("aistudio.google.com");
+    return window.self !== window.top || document.referrer.includes("aistudio.google.com") || location.hostname.includes("googleusercontent.com");
   } catch {
     return true;
   }
 }
 
+let memoryStorageInstalled = false;
+function installMemoryIndexedDb() {
+  if (typeof window === "undefined") return false;
+  if (memoryStorageInstalled) return true;
+  try {
+    Object.defineProperty(globalThis, "indexedDB", { configurable: true, writable: true, value: memoryIndexedDB });
+    Object.defineProperty(globalThis, "IDBKeyRange", { configurable: true, writable: true, value: MemoryIDBKeyRange });
+    memoryStorageInstalled = true;
+    return true;
+  } catch (error) {
+    console.error("Unable to install preview IndexedDB fallback", error);
+    return false;
+  }
+}
+
+// Install the fallback synchronously during client module evaluation. This avoids
+// waiting for a dynamic import inside useEffect, which can stall in embedded iOS previews.
+if (typeof window !== "undefined" && isEmbeddedPreview()) installMemoryIndexedDb();
+
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error(message)), ms);
-    promise.then((value) => { window.clearTimeout(timer); resolve(value); }, (error) => { window.clearTimeout(timer); reject(error); });
+    promise.then(
+      (value) => { window.clearTimeout(timer); resolve(value); },
+      (error) => { window.clearTimeout(timer); reject(error); },
+    );
   });
 }
 
-function probeNativeIndexedDb(timeoutMs = 1500): Promise<boolean> {
+function probeNativeIndexedDb(timeoutMs = 1200): Promise<boolean> {
   if (typeof indexedDB === "undefined") return Promise.resolve(false);
   return new Promise((resolve) => {
     let settled = false;
@@ -117,6 +146,7 @@ class ModuleErrorBoundary extends Component<{ children: ReactNode }, { error: Er
 export default function PosAppV3({ initialModuleKey }: { initialModuleKey?: string | null }) {
   const [storageStatus, setStorageStatus] = useState<StorageStatus>("booting");
   const [storageError, setStorageError] = useState("");
+  const [bootAttempt, setBootAttempt] = useState(0);
   const [counts, setCounts] = useState<StoreCounts>(emptyCounts);
   const [settings, setSettings] = useState<PosSettings | null>(null);
   const [activeModule, setActiveModule] = useState<ModuleDefinition | null>(() => moduleForKey(initialModuleKey));
@@ -129,18 +159,28 @@ export default function PosAppV3({ initialModuleKey }: { initialModuleKey?: stri
 
   useEffect(() => {
     let cancelled = false;
+    setStorageStatus("booting");
+    setStorageError("");
+
     async function bootStorage() {
       try {
-        const embeddedPreview = isEmbeddedPreview();
-        const nativeWorks = embeddedPreview ? false : await probeNativeIndexedDb();
-        let mode: StorageStatus = "ready";
-        if (!nativeWorks) {
-          await import("fake-indexeddb/auto");
-          mode = "memory";
+        const preview = isEmbeddedPreview();
+        let mode: StorageStatus = preview ? "memory" : "ready";
+
+        if (preview) {
+          if (!installMemoryIndexedDb()) throw new Error("PREVIEW_STORAGE_INSTALL_FAILED");
+        } else {
+          const nativeWorks = await probeNativeIndexedDb();
+          if (!nativeWorks) {
+            if (!installMemoryIndexedDb()) throw new Error("LOCAL_STORAGE_UNAVAILABLE");
+            mode = "memory";
+          }
         }
-        await withTimeout(openPosDatabase(), 4000, "LOCAL_DB_OPEN_TIMEOUT");
-        await withTimeout(ensureJournalOpeningSnapshot(), 4000, "LOCAL_DB_INIT_TIMEOUT");
-        await withTimeout(refreshCounts(), 4000, "LOCAL_DB_READ_TIMEOUT");
+
+        await withTimeout(openPosDatabase(), 3000, "LOCAL_DB_OPEN_TIMEOUT");
+        await withTimeout(ensureJournalOpeningSnapshot(), 3000, "LOCAL_DB_INIT_TIMEOUT");
+        await withTimeout(refreshCounts(), 3000, "LOCAL_DB_READ_TIMEOUT");
+
         if (!cancelled) {
           setStorageStatus(mode);
           setStorageError("");
@@ -153,57 +193,132 @@ export default function PosAppV3({ initialModuleKey }: { initialModuleKey?: stri
         }
       }
     }
+
+    const watchdog = window.setTimeout(() => {
+      if (!cancelled) {
+        setStorageStatus((current) => current === "booting" ? "error" : current);
+        setStorageError((current) => current || "STORAGE_BOOT_WATCHDOG_TIMEOUT");
+      }
+    }, 7000);
+
     void bootStorage();
-    return () => { cancelled = true; };
-  }, [refreshCounts]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(watchdog);
+    };
+  }, [bootAttempt, refreshCounts]);
 
   useEffect(() => { setActiveModule(moduleForKey(initialModuleKey)); }, [initialModuleKey]);
 
   const openModule = useCallback((key: ModuleKey) => {
     setActiveModule(moduleForKey(key));
-    window.history.replaceState(null, "", `/?module=${encodeURIComponent(key)}`);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", `/module/${encodeURIComponent(key)}`);
   }, []);
-  const closeModule = useCallback(() => { setActiveModule(null); window.history.replaceState(null, "", "/"); }, []);
+  const closeModule = useCallback(() => {
+    setActiveModule(null);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", "/");
+  }, []);
   const linkOpen = useCallback((event: MouseEvent<HTMLAnchorElement>, key: ModuleKey) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    event.preventDefault(); openModule(key);
+    event.preventDefault();
+    openModule(key);
   }, [openModule]);
-  const linkClose = useCallback((event: MouseEvent<HTMLAnchorElement>) => { event.preventDefault(); closeModule(); }, [closeModule]);
-  const requestOwnerApproval = useCallback(async (): Promise<OwnerApprovalDecision> => ({ approved: true, ownerName: "خاوەن", decidedAt: new Date().toISOString(), reason: "owner" }), []);
+  const linkClose = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    closeModule();
+  }, [closeModule]);
+  const requestOwnerApproval = useCallback(async (): Promise<OwnerApprovalDecision> => ({
+    approved: true,
+    ownerName: "خاوەن",
+    decidedAt: new Date().toISOString(),
+    reason: "owner",
+  }), []);
+
   const storageReady = storageStatus === "ready" || storageStatus === "memory";
-  const storageLabel = useMemo(() => storageStatus === "memory" ? "Preview storage ئامادەیە" : storageStatus === "ready" ? "داتای ناوخۆ ئامادەیە" : storageStatus === "error" ? "هەڵەی بنکەدراوە" : "ئامادەکردنی داتا...", [storageStatus]);
+  const storageLabel = useMemo(() => {
+    if (storageStatus === "memory") return "Preview storage ئامادەیە";
+    if (storageStatus === "ready") return "داتای ناوخۆ ئامادەیە";
+    if (storageStatus === "error") return "هەڵەی بنکەدراوە";
+    return "ئامادەکردنی داتا...";
+  }, [storageStatus]);
 
   return (
-    <main className="pos-shell" data-storage-status={storageStatus}>
+    <main className="pos-shell" data-storage-status={storageStatus} data-launcher-version="v4">
       <header className="topbar">
         <div className="brand-lockup video-brand"><span className="brand-mark" aria-hidden="true"><Store size={21} /></span><div><strong>ZHIROX</strong><span>SMART POS</span></div></div>
         <div className="video-account-title"><strong>داشبۆردی حساب</strong><span>{settings?.marketName || "Zhirox Smart POS"}</span></div>
         <span className="connection-state" data-online={storageReady}><span>{storageLabel}</span></span>
       </header>
 
-      {storageStatus === "error" && <div className="owner-risk-banner"><TriangleAlert size={20} /><div><strong>بنکەدراوەی ناوخۆ نەکرایەوە</strong><span>{storageError}</span></div></div>}
-      {storageStatus === "memory" && <div className="owner-risk-banner"><TriangleAlert size={20} /><div><strong>AI Studio Preview: storage fallback چالاکە</strong><span>بەشەکان ئێستا کار دەکەن. ئەم داتا کاتییە تەنها بۆ Preview session ـە؛ لە deployment ـی ڕاستەقینەدا IndexedDB ـی هەمیشەیی بەکاردێت.</span></div></div>}
+      {storageStatus === "error" && (
+        <div className="owner-risk-banner" role="alert">
+          <TriangleAlert size={20} />
+          <div><strong>بنکەدراوە ئامادە نەبوو</strong><span>{storageError}</span></div>
+          <button type="button" onClick={() => setBootAttempt((value) => value + 1)}>دووبارە هەوڵدانەوە</button>
+        </div>
+      )}
+      {storageStatus === "memory" && (
+        <div className="owner-risk-banner">
+          <TriangleAlert size={20} />
+          <div><strong>AI Studio Preview storage چالاکە</strong><span>بەشەکان کار دەکەن؛ داتای ئەم fallback ـە تەنها بۆ Preview session ـە.</span></div>
+        </div>
+      )}
 
       <section className="dashboard-wrap video-dashboard">
         <section className="module-grid" aria-label="بەشەکانی سیستەم">
-          {modules.map((module) => { const Icon = module.icon; const count = module.countStore ? counts[module.countStore] : null; return (
-            <a href={`/module/${module.key}`} className={`module-card tone-${module.tone}`} key={module.key} data-module-key={module.key} aria-label={`کردنەوەی ${module.title}`} onClick={(event) => linkOpen(event, module.key)}>
-              <span className="module-icon"><Icon size={28} strokeWidth={1.65} /></span><span className="module-copy"><strong>{module.title}</strong><small>{module.description}</small></span>{count !== null && count > 0 && <span className="module-count">{new Intl.NumberFormat("ckb-IQ").format(count)}</span>}
-            </a>
-          ); })}
+          {modules.map((module) => {
+            const Icon = module.icon;
+            const count = module.countStore ? counts[module.countStore] : null;
+            return (
+              <a
+                href={`/module/${module.key}`}
+                className={`module-card tone-${module.tone}`}
+                key={module.key}
+                data-module-key={module.key}
+                aria-label={`کردنەوەی ${module.title}`}
+                onClick={(event) => linkOpen(event, module.key)}
+              >
+                <span className="module-icon"><Icon size={28} strokeWidth={1.65} /></span>
+                <span className="module-copy"><strong>{module.title}</strong><small>{module.description}</small></span>
+                {count !== null && count > 0 && <span className="module-count">{new Intl.NumberFormat("ckb-IQ").format(count)}</span>}
+              </a>
+            );
+          })}
         </section>
       </section>
 
-      {activeModule && <div className="module-overlay" role="dialog" aria-modal="true" aria-label={activeModule.title}>
-        <a className="overlay-scrim" href="/" aria-label="داخستن" onClick={linkClose} />
-        <section className="module-drawer">
-          <header className={`drawer-head tone-${activeModule.tone}`}><div className="drawer-title"><span>{(() => { const Icon = activeModule.icon; return <Icon size={26} />; })()}</span><div><h2>{activeModule.title}</h2><p>{activeModule.description}</p></div></div><a href="/" className="close-button" onClick={linkClose} aria-label="داخستن"><X size={22} /></a></header>
-          <div className="drawer-body">
-            {!storageReady ? <div className="workspace-loading"><span /><p>{storageStatus === "error" ? `بنکەدراوە ئامادە نییە: ${storageError}` : "ئامادەکردنی بنکەدراوە..."}</p></div> :
-              <ModuleErrorBoundary key={activeModule.key}><ModuleWorkspace key={activeModule.key} moduleKey={activeModule.key} onDataChanged={refreshCounts} onNavigate={openModule} activeRole="owner" cashierPermissions={DEFAULT_CASHIER_PERMISSIONS} requestOwnerApproval={requestOwnerApproval} /></ModuleErrorBoundary>}
-          </div>
-        </section>
-      </div>}
+      {activeModule && (
+        <div className="module-overlay" role="dialog" aria-modal="true" aria-label={activeModule.title}>
+          <a className="overlay-scrim" href="/" aria-label="داخستن" onClick={linkClose} />
+          <section className="module-drawer">
+            <header className={`drawer-head tone-${activeModule.tone}`}>
+              <div className="drawer-title"><span>{(() => { const Icon = activeModule.icon; return <Icon size={26} />; })()}</span><div><h2>{activeModule.title}</h2><p>{activeModule.description}</p></div></div>
+              <a href="/" className="close-button" onClick={linkClose} aria-label="داخستن"><X size={22} /></a>
+            </header>
+            <div className="drawer-body">
+              {!storageReady ? (
+                <div className="workspace-loading">
+                  {storageStatus === "booting" ? <span /> : <TriangleAlert size={36} />}
+                  <p>{storageStatus === "error" ? `بنکەدراوە ئامادە نییە: ${storageError}` : "ئامادەکردنی بنکەدراوە..."}</p>
+                  {storageStatus === "error" && <button type="button" className="primary-action" onClick={() => setBootAttempt((value) => value + 1)}>دووبارە هەوڵدانەوە</button>}
+                </div>
+              ) : (
+                <ModuleErrorBoundary key={activeModule.key}>
+                  <ModuleWorkspace
+                    key={activeModule.key}
+                    moduleKey={activeModule.key}
+                    onDataChanged={refreshCounts}
+                    onNavigate={openModule}
+                    activeRole="owner"
+                    cashierPermissions={DEFAULT_CASHIER_PERMISSIONS}
+                    requestOwnerApproval={requestOwnerApproval}
+                  />
+                </ModuleErrorBoundary>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
