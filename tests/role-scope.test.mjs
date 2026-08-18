@@ -23,5 +23,7 @@ test("configured owner rotation disables stale active owner rows", async () => {
   const authStore = await readFile(new URL("../db/auth-store.ts", import.meta.url), "utf8");
   assert.match(authStore, /role = 'owner' AND actor_id <> \? AND active = 1/);
   assert.match(authStore, /SET active = 0/);
+  assert.match(authStore, /identity\.email === ownerEmail/);
+  assert.match(authStore, /ensureConfiguredOwner\(identity, actorId\)/);
   assert.match(authStore, /ZHIROX_OWNER_EMAIL/);
 });
