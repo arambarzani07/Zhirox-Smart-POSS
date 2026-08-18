@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "fake-indexeddb": "^6.2.4",
     "jsbarcode": "^3.11.6",
     "lucide-react": "^0.468.0",
     "next": "16.2.6",
