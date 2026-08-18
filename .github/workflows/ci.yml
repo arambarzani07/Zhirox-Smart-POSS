@@ -2,11 +2,9 @@ name: Zhirox CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -16,37 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build and test
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 15
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22.x
-
-      - name: Verify Node.js compatibility
-        run: node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 15)) { console.error('Zhirox requires Node >=22.15.0; got ' + process.versions.node); process.exit(1); }"
-
-      # This repository currently has no committed package-lock.json. npm ci and
-      # setup-node's npm cache both require a lockfile, so use a clean npm install
-      # until the dependency graph is intentionally locked and committed.
-      - name: Install dependencies
+      - name: Install
         run: npm install --no-audit --no-fund
-
       - name: Lint
         run: npm run lint
-
       - name: Typecheck
         run: npm run typecheck
-
-      - name: Build Next standalone
+      - name: Build
         run: npm run build
-
-      - name: Run regression tests
+      - name: Test
         run: npm test

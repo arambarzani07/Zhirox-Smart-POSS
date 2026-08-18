@@ -1,6 +1,0 @@
-{
-  "name": "Zhirox Smart POS",
-  "description": "سیستەمی کاشێر، کۆگا و ژمێریاری بە زمانی کوردی - POS system with Kurdish language support, sales, inventory, and accounting",
-  "requestFramePermissions": ["camera"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
