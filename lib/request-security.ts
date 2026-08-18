@@ -52,6 +52,34 @@ export function requireAuthenticatedIdentity(request: Request): AuthenticatedIde
   return { email, displayName };
 }
 
+export async function readBoundedJsonObject(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") throw new ApiSecurityError(415, "CONTENT_TYPE_JSON_REQUIRED");
+
+  const lengthHeader = request.headers.get("content-length");
+  if (lengthHeader) {
+    const declaredLength = Number(lengthHeader);
+    if (!Number.isFinite(declaredLength) || declaredLength < 0) throw new ApiSecurityError(400, "INVALID_CONTENT_LENGTH");
+    if (declaredLength > maxBytes) throw new ApiSecurityError(413, "REQUEST_PAYLOAD_TOO_LARGE");
+  }
+
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > maxBytes) {
+    throw new ApiSecurityError(413, "REQUEST_PAYLOAD_TOO_LARGE");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new ApiSecurityError(400, "INVALID_JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ApiSecurityError(400, "JSON_OBJECT_REQUIRED");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function apiSecurityResponse(error: unknown) {
   if (!(error instanceof ApiSecurityError)) return null;
   return Response.json(
