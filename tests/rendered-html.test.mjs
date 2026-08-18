@@ -1,46 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { registerHooks } from "node:module";
 import test from "node:test";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier === "cloudflare:workers") {
-      return { url: "data:text/javascript,export const env = {};", shortCircuit: true };
-    }
-    return nextResolve(specifier, context);
-  },
-});
+const developmentPreviewMeta = /"codex-preview"\s*:\s*"development"/;
 
-const developmentPreviewMeta =
-  /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
-
-test("renders development preview metadata", async () => {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
-
-  const response = await worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
-
-  assert.equal(response.status, 200);
-  assert.match(
-    response.headers.get("content-type") ?? "",
-    /^text\/html\b/i,
-  );
-  assert.match(await response.text(), developmentPreviewMeta);
+test("keeps development preview metadata in the Next root layout", async () => {
+  const layoutSource = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  assert.match(layoutSource, developmentPreviewMeta);
+  assert.match(layoutSource, /lang="ckb"/);
+  assert.match(layoutSource, /dir="rtl"/);
 });
 
 test("keeps the single-market dashboard at exactly twenty-one visible modules", async () => {
@@ -61,18 +29,21 @@ test("keeps the single-market dashboard at exactly twenty-one visible modules", 
   ]);
 });
 
-test("packages single-market D1 sync without caching API responses", async () => {
-  const [hostingText, routeSource, productionRouteSource, serviceWorkerSource, syncStoreSource] = await Promise.all([
+test("packages single-market sync for the current Next standalone runtime without caching API responses", async () => {
+  const [hostingText, nextConfigSource, routeSource, productionRouteSource, serviceWorkerSource, syncStoreSource] = await Promise.all([
     readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"),
+    readFile(new URL("../next.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/sync/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/production/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
     readFile(new URL("../db/sync-store.ts", import.meta.url), "utf8"),
   ]);
   assert.equal(JSON.parse(hostingText).d1, "DB");
+  assert.match(nextConfigSource, /output:\s*"standalone"/);
   assert.match(routeSource, /singleMarketActor/);
   assert.match(routeSource, /SyncConflictError/);
   assert.match(productionRouteSource, /restoreCloudRevision/);
+  assert.match(syncStoreSource, /DatabaseSync/);
   assert.match(syncStoreSource, /status = 'completed'/);
   assert.match(syncStoreSource, /mergeConcurrentSyncState/);
   assert.match(syncStoreSource, /CREATE TABLE IF NOT EXISTS pos_staff/);
@@ -82,12 +53,15 @@ test("packages single-market D1 sync without caching API responses", async () =>
 });
 
 test("posts immutable balanced journals for every financial and inventory mutation", async () => {
-  const [databaseSource, moneySource, syncContractSource, workspaceSource, serviceWorkerSource] = await Promise.all([
+  const [databaseSource, moneySource, syncContractSource, workspaceSource, serviceWorkerSource, securitySource, intelligenceSource, globalsSource] = await Promise.all([
     readFile(new URL("../lib/pos-db.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/pos-money.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/sync-contract.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/module-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
+    readFile(new URL("../lib/device-security.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/offline-intelligence.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(databaseSource, /const DB_VERSION = 13/);
@@ -103,8 +77,8 @@ test("posts immutable balanced journals for every financial and inventory mutati
   assert.match(workspaceSource, /supermarket-zhirox-import\.csv/);
   assert.match(databaseSource, /openCursor\(\)/);
   assert.match(databaseSource, /LocalSafetyBackupSummary/);
-  assert.match(await readFile(new URL("../lib/device-security.ts", import.meta.url), "utf8"), /PBKDF2/);
-  assert.match(await readFile(new URL("../lib/device-security.ts", import.meta.url), "utf8"), /updateDeviceSecurity/);
+  assert.match(securitySource, /PIN security has been retired/);
+  assert.match(securitySource, /return null/);
   assert.match(databaseSource, /zhirox\.active-operator\.v1/);
   assert.match(databaseSource, /assertAccountingPeriodOpen/);
   assert.match(databaseSource, /period\.closed/);
@@ -119,12 +93,11 @@ test("posts immutable balanced journals for every financial and inventory mutati
   assert.match(workspaceSource, /زنجیرەی پەسەندی خاوەن/);
   assert.match(workspaceSource, /approval\.applied/);
   assert.match(workspaceSource, /approval\.expired/);
-  assert.match(workspaceSource, /approval\.pin_locked/);
   assert.match(workspaceSource, /هەڵبژاردنی فایلی \.BAK/);
   assert.match(workspaceSource, /SHA-256/);
   assert.match(workspaceSource, /زیرەکی ناوخۆ/);
-  assert.match(await readFile(new URL("../lib/offline-intelligence.ts", import.meta.url), "utf8"), /buildOfflineInsights/);
-  assert.match(await readFile(new URL("../lib/offline-intelligence.ts", import.meta.url), "utf8"), /offlineHealthScore/);
+  assert.match(intelligenceSource, /buildOfflineInsights/);
+  assert.match(intelligenceSource, /offlineHealthScore/);
   assert.match(workspaceSource, /بەدواداچوونی گارانتی/);
   assert.match(workspaceSource, /WarrantyForm/);
   assert.match(databaseSource, /WarrantyRecord/);
@@ -165,7 +138,7 @@ test("posts immutable balanced journals for every financial and inventory mutati
   assert.match(databaseSource, /slice\(30\)/);
   assert.match(databaseSource, /کاتێک قاسە جیاوازی هەیە، نووسینی هۆکار ناچارییە/);
   assert.match(workspaceSource, /discount-control/);
-  assert.match(await readFile(new URL("../app/globals.css", import.meta.url), "utf8"), /Locked design system refinement/);
+  assert.match(globalsSource, /Locked design system refinement/);
   assert.match(workspaceSource, /نزیکترین بەرواری بەسەرچوون/);
   assert.match(workspaceSource, /بەسەرچوو/);
   assert.match(databaseSource, /بەسەرچووە و فرۆشتنی ڕێگەپێنەدراوە/);
