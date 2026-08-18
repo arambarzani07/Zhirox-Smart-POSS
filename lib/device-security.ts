@@ -19,8 +19,9 @@ export const DEFAULT_CASHIER_PERMISSIONS: CashierPermissions = {
 type RetiredCredential = { salt: string; hash: string };
 
 /**
+ * PIN security has been retired from Zhirox Smart POS.
  * Compatibility-only shape for legacy imports. Device PIN authentication is
- * permanently retired; owner/cashier credential fields are never populated.
+ * permanently disabled; owner/cashier credential fields are never populated.
  */
 export type DeviceSecurityConfig = {
   version: 2;
