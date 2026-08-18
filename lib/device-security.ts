@@ -130,3 +130,12 @@ export function setActiveOperator(config: DeviceSecurityConfig, role: DeviceRole
 export function clearActiveOperator() {
   sessionStorage.removeItem("zhirox.active-operator.v1");
 }
+
+export function removeDeviceSecurity() {
+  try {
+    localStorage.removeItem(SECURITY_KEY);
+    sessionStorage.removeItem("zhirox.active-operator.v1");
+  } catch {
+    // storage cleanup is best effort
+  }
+}

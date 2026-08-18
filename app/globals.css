@@ -99,7 +99,30 @@ button { -webkit-tap-highlight-color: transparent; }
 .summary-strip strong { font-size: 21px; font-variant-numeric: tabular-nums; }
 
 .module-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 13px; }
-.module-card { --tone: #555; position: relative; min-height: 106px; border: 0; border-radius: 13px; padding: 17px; display: flex; align-items: center; gap: 14px; text-align: right; color: #fff; cursor: pointer; overflow: hidden; box-shadow: 0 7px 16px color-mix(in srgb, var(--tone), transparent 78%); transition: transform .16s ease, box-shadow .16s ease, filter .16s ease; background: linear-gradient(145deg, color-mix(in srgb, var(--tone), #fff 5%), var(--tone)); }
+.module-card {
+  --tone: #555;
+  position: relative;
+  min-height: 106px;
+  border: 0;
+  border-radius: 13px;
+  padding: 17px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: right;
+  color: #fff;
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: 0 7px 16px color-mix(in srgb, var(--tone), transparent 78%);
+  transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--tone), #fff 5%), var(--tone));
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(255,255,255,.2);
+  user-select: none;
+}
+.module-card:active {
+  transform: scale(0.97);
+}
 .module-card::after { content: ""; position: absolute; width: 110px; height: 110px; border: 1px solid rgba(255,255,255,.12); border-radius: 50%; left: -45px; bottom: -61px; }
 .module-card:hover { transform: translateY(-3px); filter: saturate(1.06); box-shadow: 0 13px 24px color-mix(in srgb, var(--tone), transparent 72%); }
 .module-card:focus-visible { outline: 3px solid color-mix(in srgb, var(--tone), #fff 55%); outline-offset: 3px; }
@@ -215,9 +238,14 @@ button { -webkit-tap-highlight-color: transparent; }
 .account-type.income { color: #28698a; background: #eaf5fa; }
 .account-type.expense { color: #916019; background: #fff3dc; }
 
-.module-overlay { position: fixed; inset: 0; z-index: 50; display: flex; justify-content: flex-start; }
+.module-overlay { position: fixed; inset: 0; z-index: 100; display: flex; justify-content: flex-start; }
 .overlay-scrim { position: absolute; inset: 0; border: 0; background: rgba(22,24,29,.46); backdrop-filter: blur(3px); cursor: default; }
 .module-drawer { width: min(1180px, 96vw); height: 100%; position: relative; z-index: 1; display: flex; flex-direction: column; background: #f7f8fb; box-shadow: 20px 0 60px rgba(18,20,24,.23); animation: slideIn .2s ease-out; }
+@media (max-width: 768px) {
+  .module-drawer { width: 100vw; max-width: 100vw; }
+  .drawer-head { padding: 14px 16px; min-height: 70px; }
+  .module-workspace { padding: 14px 12px; }
+}
 @keyframes slideIn { from { transform: translateX(-30px); opacity: 0; } }
 .drawer-head { --tone: #555; min-height: 105px; padding: 24px; display: flex; align-items: center; justify-content: space-between; gap: 18px; color: #fff; background: linear-gradient(135deg, var(--tone), color-mix(in srgb, var(--tone), #000 13%)); }
 .drawer-title { display: flex; align-items: center; gap: 14px; }

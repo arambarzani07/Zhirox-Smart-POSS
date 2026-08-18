@@ -10,6 +10,7 @@ import {
   ChevronUp,
   ClipboardCheck,
   Cloud,
+  Database,
   Download,
   Eye,
   FileText,
@@ -950,7 +951,7 @@ function Cashier({ data, mutate, onNavigate, activeRole, permissions, requestOwn
       approvalId = createId("approval");
       const customer = data.customers.find((item) => item.id === customerId);
       const reason = cashierDiscountExceeded ? `داشکاندنی ${discountPercent.toFixed(2)}٪؛ سنوور ${permissions?.maxDiscountPercent ?? 0}٪` : `فرۆشتنی قەرز بە بڕی ${money(debtIQD)}`;
-      approvalDetails = `${reason} | کڕیار: ${customer?.name || "کڕیاری کاش"} | کۆی مامەڵە: ${money(totalAfterDiscount)} | کاشێر: ${operator.name}`;
+      approvalDetails = `${reason} | کڕیار: ${customer?.name || "کڕیاری کاش"} | کۆی مامەڵە: ${money(total)} | کاشێر: ${operator.name}`;
       await recordAuditEvent("approval.requested", approvalId, approvalDetails);
       const decision = await requestOwnerApproval?.(approvalDetails);
       if (!decision?.approved) {
@@ -968,9 +969,10 @@ function Cashier({ data, mutate, onNavigate, activeRole, permissions, requestOwn
     await mutate(async () => {
       completed = await completeSale({ customerId: customerId || null, items: cartRows.map((row) => ({ productId: row.product.id, quantity: row.quantity })), paidAmount: tenderedNumber, paymentCurrency, exchangeRateIQDPerUSD: exchangeRate, paymentMethod, discountIQD });
     }, "فرۆشتن تەواو بوو و کۆگا نوێ کرایەوە");
-    if (completed) {
-      if (approvalId) await recordAuditEvent("approval.applied", completed.id, `ناسێنەری پەسەند: ${approvalId} | ${approvalDetails}`);
-      setLastSale(completed);
+    const saleResult = completed as Sale | null;
+    if (saleResult) {
+      if (approvalId) await recordAuditEvent("approval.applied", saleResult.id, `ناسێنەری پەسەند: ${approvalId} | ${approvalDetails}`);
+      setLastSale(saleResult);
       setCart({});
       setPaid("");
       setCustomerId("");
@@ -1074,7 +1076,7 @@ function ReturnsPage({ kind, data, mutate }: { kind: "sale" | "purchase"; data: 
   const [warrantyOpen, setWarrantyOpen] = useState(false);
   const [selectedWarranty, setSelectedWarranty] = useState<WarrantyRecord | null>(null);
   const normalizedQuery = query.trim().toLowerCase();
-  const sources = (isSale ? data.sales : data.purchases).filter((item) => item.status !== "returned" && (!normalizedQuery || `${item.receiptNo} ${"customerName" in item ? item.customerName : item.supplierName} ${"items" in item ? item.items.map((line) => `${line.name} ${line.barcode}`).join(" ") : ""}`.toLowerCase().includes(normalizedQuery)));
+  const sources = (isSale ? data.sales : data.purchases).filter((item) => item.status !== "returned" && (!normalizedQuery || `${item.receiptNo} ${"customerName" in item ? item.customerName : item.supplierName} ${Array.isArray(item.items) ? item.items.map((line) => `${line.name} ${line.barcode}`).join(" ") : ""}`.toLowerCase().includes(normalizedQuery)));
   const returns = isSale ? data.saleReturns : data.purchaseReturns;
   return <><Toolbar title={isSale ? "گەڕاوی فرۆش و گارانتی" : "گەڕاوی کڕین"} description="هەڵبژاردنی کالا و بڕ؛ کۆگا، قەرز و قاسە خۆکارانە نوێ دەبنەوە" search={query} setSearch={setQuery} action={isSale ? <button className="toolbar-primary" type="button" disabled={!data.sales.length} onClick={() => setWarrantyOpen(true)}><Plus size={16} />داواکاری گارانتی</button> : undefined} />{!sources.length ? <EmptyState icon={<ArchiveRestore size={40} />} title="پسوڵەی شیاو نییە" text={normalizedQuery ? "پسوڵەیەک بەو زانیارییە نەدۆزرایەوە." : "هیچ مامەڵەیەکی تەواو بۆ گەڕاندنەوە نییە."} /> : <div className="return-list">{sources.map((source) => <article key={source.id}><div><strong>{source.receiptNo}</strong><span>{"customerName" in source ? source.customerName : source.supplierName}</span><small>{dateTime(source.createdAt)}</small></div><div className="return-value"><b>{money(source.totalIQD)}</b>{source.status === "partial" && <span className="status-pill partial">بەشێکی گەڕاوەتەوە</span>}</div><button className="danger-action" type="button" onClick={() => setSelectedSource(source)}>هەڵبژاردنی کالا</button></article>)}</div>}<div className="subsection-title"><h4>مێژووی گەڕاوەکان</h4><span>{numberFormatter.format(returns.length)}</span></div>{returns.length > 0 && <div className="data-table-wrap compact"><table className="data-table"><thead><tr><th>پسوڵە</th><th>کالا</th><th>بڕ</th><th>هۆکار/چارەسەر</th><th>شێوازی پارەدان</th><th>بەروار</th></tr></thead><tbody>{[...returns].reverse().map((item) => { const method = recordPaymentMethod(item); return <tr key={item.id}><td dir="ltr">{item.receiptNo}</td><td>{item.items?.map((row) => row.name).join("، ") || "هەموو پسوڵە"}</td><td>{money(item.totalIQD)}{Boolean(item.discountImpactIQD) && <small className="table-subvalue">پشکی داشکاندن: {money(item.discountImpactIQD ?? 0)}</small>}</td><td>{item.reason || "—"}</td><td><span className={`payment-pill ${method}`}>{paymentMethodLabel(method)}</span></td><td>{dateTime(item.createdAt)}</td></tr>; })}</tbody></table></div>}{isSale && <><div className="subsection-title"><h4>بەدواداچوونی گارانتی</h4><span>{numberFormatter.format(data.warranties.length)}</span></div>{!data.warranties.length ? <EmptyState icon={<MonitorCheck size={38} />} title="داواکاری گارانتی نییە" text="داواکارییەکان بە ژمارەی سێریاڵ و دۆخی چارەسەر لێرە دەپارێزرێن." /> : <div className="warranty-grid">{[...data.warranties].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((claim) => <button type="button" key={claim.id} onClick={() => setSelectedWarranty(claim)}><span><strong>{claim.productName}</strong><small dir="ltr">{claim.claimNo} · {claim.serialNo}</small></span><i>{claim.customerName}</i><b className={`warranty-status ${claim.status}`}>{warrantyStatusLabel(claim.status)}</b><small>{claim.issue}</small></button>)}</div>}</>}{selectedSource && <Modal wide title={`گەڕاندنەوەی ${selectedSource.receiptNo}`} onClose={() => setSelectedSource(null)}><ReturnEditor kind={kind} source={selectedSource} returns={returns} mutate={mutate} onDone={() => setSelectedSource(null)} /></Modal>}{warrantyOpen && <Modal wide title="تۆمارکردنی داواکاری گارانتی" onClose={() => setWarrantyOpen(false)}><WarrantyForm data={data} mutate={mutate} onDone={() => setWarrantyOpen(false)} /></Modal>}{selectedWarranty && <Modal wide title={`گارانتی ${selectedWarranty.claimNo}`} onClose={() => setSelectedWarranty(null)}><WarrantyDetail claim={selectedWarranty} mutate={mutate} onDone={() => setSelectedWarranty(null)} /></Modal>}</>;
 }
@@ -1506,7 +1508,7 @@ function PeriodClosePanel({ data, mutate }: { data: DashboardData; mutate: Mutat
   const netSales = sales.reduce((sum, item) => sum + item.totalIQD, 0) - saleReturns.reduce((sum, item) => sum + item.totalIQD, 0);
   const netPurchases = purchases.reduce((sum, item) => sum + item.totalIQD, 0) - purchaseReturns.reduce((sum, item) => sum + item.totalIQD, 0);
   const expenseTotal = expenses.reduce((sum, item) => sum + item.amountIQD, 0);
-  const lossTotal = losses.reduce((sum, item) => sum + item.amountIQD, 0);
+  const lossTotal = losses.reduce((sum, item) => sum + item.costIQD, 0);
   const returnedProfit = saleReturns.reduce((sum, item) => sum + returnedSaleProfit(item, data.sales), 0);
   const netProfit = sales.reduce((sum, item) => sum + item.profitIQD, 0) - returnedProfit - expenseTotal - lossTotal;
   const inventoryValue = data.products.reduce((sum, item) => sum + item.stock * item.purchasePriceIQD, 0);

@@ -1988,7 +1988,7 @@ export async function createLocalSafetyBackup(reason: string): Promise<LocalSafe
   const json = JSON.stringify(payload);
   const backup: LocalSafetyBackup = {
     id: createId("local_backup"), createdAt: payload.exportedAt, reason: reason.trim() || "پاشەکەوتی خۆکار",
-    recordCount: Object.values(data).reduce((sum, records) => sum + (Array.isArray(records) ? records.length : 0), 0),
+    recordCount: Object.values(data).reduce((sum: number, records: unknown) => sum + (Array.isArray(records) ? records.length : 0), 0),
     digest: payload.integrity!.digest, json,
   };
   const db = await openPosDatabase();

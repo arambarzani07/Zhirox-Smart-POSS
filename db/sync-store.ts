@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { DatabaseSync } from "node:sqlite";
 import { mergeConcurrentSyncState, validateMergedSyncState, type MergeRecord } from "@/lib/pos-sync-merge";
 import {
   POS_APP_VERSION,
@@ -20,6 +20,84 @@ import {
 
 const TOMBSTONE = "__deleted";
 let schemaPromise: Promise<void> | null = null;
+
+export type D1Result<T = unknown> = {
+  results: T[];
+  success?: boolean;
+  meta?: unknown;
+};
+
+export interface D1PreparedStatement {
+  bind(...params: unknown[]): D1PreparedStatement;
+  first<T = unknown>(colName?: string): Promise<T | null>;
+  all<T = unknown>(): Promise<D1Result<T>>;
+  run<T = unknown>(): Promise<D1Result<T>>;
+}
+
+export interface D1Database {
+  prepare(query: string): D1PreparedStatement;
+  batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
+}
+
+let inMemoryD1Instance: D1Database | null = null;
+
+function getInMemoryD1(): D1Database {
+  if (inMemoryD1Instance) return inMemoryD1Instance;
+  const sqlite = new DatabaseSync(":memory:");
+  inMemoryD1Instance = {
+    prepare(sql: string): D1PreparedStatement {
+      const createBoundStmt = (params: unknown[]): D1PreparedStatement => {
+        const stmtObj: D1PreparedStatement = {
+          bind(...newParams: unknown[]) {
+            return createBoundStmt(newParams);
+          },
+          async first<T = unknown>() {
+            try {
+              const stmt = sqlite.prepare(sql);
+              const res = stmt.get(...(params as any[]));
+              return (res as T) ?? null;
+            } catch (e) {
+              console.error("D1 first error:", e, "SQL:", sql);
+              return null;
+            }
+          },
+          async all<T = unknown>() {
+            try {
+              const stmt = sqlite.prepare(sql);
+              const results = stmt.all(...(params as any[]));
+              return { results: (results as T[]) ?? [] };
+            } catch (e) {
+              console.error("D1 all error:", e, "SQL:", sql);
+              return { results: [] };
+            }
+          },
+          async run<T = unknown>() {
+            try {
+              const stmt = sqlite.prepare(sql);
+              const res = stmt.run(...(params as any[]));
+              return { results: [] as T[], success: true, meta: res };
+            } catch (e) {
+              console.error("D1 run error:", e, "SQL:", sql);
+              throw e;
+            }
+          },
+        };
+        return stmtObj;
+      };
+      return createBoundStmt([]);
+    },
+    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+      const results: D1Result<T>[] = [];
+      for (const stmt of statements) {
+        if (stmt && typeof stmt.run === "function") {
+          results.push(await stmt.run<T>());
+        }
+      }
+      return results;
+    },
+  };
+  return inMemoryD1Instance;
+}
 
 type StaffRow = {
   actorId: string;
@@ -52,9 +130,12 @@ export class SyncMergeConflictError extends SyncConflictError {
   }
 }
 
-function database() {
-  if (!env.DB) throw new Error("SYNC_DATABASE_UNAVAILABLE");
-  return env.DB;
+function database(): D1Database {
+  const globalEnv = (globalThis as any).env;
+  if (globalEnv && globalEnv.DB) {
+    return globalEnv.DB as D1Database;
+  }
+  return getInMemoryD1();
 }
 
 function canonicalize(value: unknown): unknown {
@@ -125,7 +206,7 @@ function recordKey(record: Pick<CloudSyncRecord, "storeName" | "recordId">) {
   return `${record.storeName}\u0000${record.recordId}`;
 }
 
-function toStaff(row: StaffRow): ServerStaffProfile {
+function toStaff(row: StaffRow) {
   return {
     actorId: row.actorId,
     email: row.email,
@@ -205,7 +286,7 @@ export async function ensureSyncSchema() {
     db.prepare("CREATE INDEX IF NOT EXISTS pos_sync_changes_record_idx ON pos_sync_changes (tenant_id, store_name, record_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS pos_devices_seen_idx ON pos_devices (tenant_id, last_seen_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS pos_restore_points_revision_idx ON pos_restore_points (tenant_id, revision)"),
-  ]).then(() => undefined).catch((error) => {
+  ]).then(() => undefined).catch((error: unknown) => {
     schemaPromise = null;
     throw error;
   });

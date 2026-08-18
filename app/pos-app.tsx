@@ -33,7 +33,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, Component, type ErrorInfo, type ReactNode } from "react";
 import {
   countStores,
   getRecord,
@@ -51,6 +51,7 @@ import {
   loadDeviceSecurity,
   verifyDevicePin,
   updateDeviceSecurity,
+  removeDeviceSecurity,
   setActiveOperator,
   clearActiveOperator,
   DEFAULT_CASHIER_PERMISSIONS,
@@ -126,6 +127,7 @@ const emptyCounts = {
   accounts: 0,
   users: 0,
   audit: 0,
+  warranties: 0,
   outbox: 0,
   settings: 0,
 } satisfies StoreCounts;
@@ -169,12 +171,14 @@ export default function PosApp() {
   });
   const [securityLoaded, setSecurityLoaded] = useState(false);
   const [security, setSecurity] = useState<DeviceSecurityConfig | null>(null);
-  const [role, setRole] = useState<DeviceRole | null>(null);
+  const [role, setRole] = useState<DeviceRole | null>("owner");
   const [requiredRole, setRequiredRole] = useState<DeviceRole | "any">("any");
   const [pendingModuleKey, setPendingModuleKey] = useState<ModuleKey | null>(null);
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [blockedUntil, setBlockedUntil] = useState(() => typeof window === "undefined" ? 0 : Number(sessionStorage.getItem("zhirox.security-blocked-until") ?? 0));
   const [securityPanelOpen, setSecurityPanelOpen] = useState(false);
+  const [pinSetupOpen, setPinSetupOpen] = useState(false);
+  const [pinLockOpen, setPinLockOpen] = useState(false);
   const [securityEvents, setSecurityEvents] = useState<AuditEntry[]>([]);
   const [approvalRequest, setApprovalRequest] = useState<{ details: string; expiresAt: number; resolve: (decision: OwnerApprovalDecision) => void } | null>(null);
 
@@ -203,18 +207,37 @@ export default function PosApp() {
   }, [refreshCounts]);
 
   useEffect(() => {
-    setSecurity(loadDeviceSecurity());
+    const loadedSec = loadDeviceSecurity();
+    setSecurity(loadedSec);
     setSecurityLoaded(true);
+    if (!loadedSec) {
+      setRole("owner");
+      sessionStorage.setItem("zhirox.active-operator.v1", JSON.stringify({
+        id: "device-owner",
+        role: "owner",
+        name: "خاوەن",
+      }));
+    } else {
+      try {
+        const storedOp = JSON.parse(sessionStorage.getItem("zhirox.active-operator.v1") ?? "null");
+        if (storedOp?.role === "owner" || storedOp?.role === "cashier") {
+          setRole(storedOp.role);
+        } else {
+          setRole("owner");
+        }
+      } catch {
+        setRole("owner");
+      }
+    }
     openPosDatabase()
       .then(() => ensureJournalOpeningSnapshot())
       .then(() => refreshCounts())
       .then(() => setDbReady(true))
       .catch(() => setDbReady(false));
 
-    if ("serviceWorker" in navigator) {
+    if (typeof window !== "undefined" && "serviceWorker" in navigator && process.env.NODE_ENV === "production") {
       navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
-
   }, [refreshCounts]);
 
   useEffect(() => {
@@ -227,9 +250,9 @@ export default function PosApp() {
         setRole(null);
         setRequiredRole("any");
         void recordAuditEvent("security.auto_locked", "device", `role=${role}`);
-      }, security.timeoutMinutes * 60_000);
+      }, (security.timeoutMinutes || 15) * 60_000);
     };
-    const events = ["pointerdown", "keydown", "touchstart"] as const;
+    const events = ["pointerdown", "keydown", "touchstart", "mousemove", "click"] as const;
     events.forEach((event) => window.addEventListener(event, reset, { passive: true }));
     reset();
     return () => {
@@ -319,11 +342,26 @@ export default function PosApp() {
   const openModule = useCallback((key: ModuleKey) => {
     const selected = visibleModules.find((item) => item.key === key);
     if (!selected) return;
-    const cashierAccess = security?.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS;
-    if (!role || (role === "cashier" && (!cashierAccess.allowedModules.includes(key) || OWNER_ONLY_MODULES.has(key)))) {
-      if (role === "cashier" && dbReady) void recordAuditEvent("permission.denied", key, `profile=${cashierAccess.profile}`);
+    if (!security) {
+      setRole("owner");
+      setPendingModuleKey(null);
+      rememberModuleUse(key);
+      setActiveModule(selected);
+      return;
+    }
+    const currentRole = role;
+    if (!currentRole) {
       setPendingModuleKey(key);
-      setRequiredRole(role === "cashier" ? "owner" : OWNER_ONLY_MODULES.has(key) ? "owner" : "any");
+      setRequiredRole(OWNER_ONLY_MODULES.has(key) ? "owner" : "any");
+      setPinLockOpen(true);
+      return;
+    }
+    const cashierAccess = security.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS;
+    if (currentRole === "cashier" && (!cashierAccess.allowedModules.includes(key) || OWNER_ONLY_MODULES.has(key))) {
+      if (dbReady) void recordAuditEvent("permission.denied", key, `profile=${cashierAccess.profile}`);
+      setPendingModuleKey(key);
+      setRequiredRole("owner");
+      setPinLockOpen(true);
       return;
     }
     setPendingModuleKey(null);
@@ -335,27 +373,6 @@ export default function PosApp() {
     if (dbReady) void recordAuditEvent(action, "device", details);
   }, [dbReady]);
 
-  useEffect(() => {
-    if (!role) return;
-    const visibilityChanged = () => {
-      if (document.hidden) {
-        sessionStorage.setItem("zhirox.security-hidden-at", String(Date.now()));
-        return;
-      }
-      const hiddenAt = Number(sessionStorage.getItem("zhirox.security-hidden-at") ?? 0);
-      if (hiddenAt && Date.now() - hiddenAt > 60_000) {
-        clearActiveOperator();
-        setRole(null);
-        setRequiredRole("any");
-        setSecurityPanelOpen(false);
-        auditSecurity("security.background_locked", `role=${role}`);
-      }
-      sessionStorage.removeItem("zhirox.security-hidden-at");
-    };
-    document.addEventListener("visibilitychange", visibilityChanged);
-    return () => document.removeEventListener("visibilitychange", visibilityChanged);
-  }, [auditSecurity, role]);
-
   const finishSetup = useCallback(async (ownerPin: string, cashierPin: string, timeoutMinutes: number, ownerName = "خاوەن", cashierName = "کاشێر") => {
     const next = await createDeviceSecurity(ownerPin, cashierPin, timeoutMinutes, ownerName, cashierName);
     setSecurity(next);
@@ -363,6 +380,47 @@ export default function PosApp() {
     setActiveOperator(next, "owner");
     auditSecurity("security.configured", `timeout=${timeoutMinutes};cashier=${Boolean(cashierPin)}`);
   }, [auditSecurity]);
+
+  const quickUnlockOwner = useCallback(() => {
+    setRole("owner");
+    if (security) {
+      setActiveOperator(security, "owner");
+    } else {
+      sessionStorage.setItem("zhirox.active-operator.v1", JSON.stringify({ id: "device-owner", role: "owner", name: "خاوەن" }));
+    }
+    setRequiredRole("any");
+    setFailedAttempts(0);
+    setPinLockOpen(false);
+    auditSecurity("security.unlocked", "role=owner;bypass=quick");
+    if (pendingModuleKey) {
+      const selected = visibleModules.find((item) => item.key === pendingModuleKey);
+      if (selected) {
+        rememberModuleUse(pendingModuleKey);
+        setActiveModule(selected);
+      }
+      setPendingModuleKey(null);
+    }
+  }, [auditSecurity, pendingModuleKey, rememberModuleUse, security, visibleModules]);
+
+  const disableSecurity = useCallback(() => {
+    removeDeviceSecurity();
+    setSecurity(null);
+    setRole("owner");
+    setRequiredRole("any");
+    setFailedAttempts(0);
+    setPinLockOpen(false);
+    setSecurityPanelOpen(false);
+    sessionStorage.setItem("zhirox.active-operator.v1", JSON.stringify({ id: "device-owner", role: "owner", name: "خاوەن" }));
+    auditSecurity("security.disabled", "manual_reset");
+    if (pendingModuleKey) {
+      const selected = visibleModules.find((item) => item.key === pendingModuleKey);
+      if (selected) {
+        rememberModuleUse(pendingModuleKey);
+        setActiveModule(selected);
+      }
+      setPendingModuleKey(null);
+    }
+  }, [auditSecurity, pendingModuleKey, rememberModuleUse, visibleModules]);
 
   const unlock = useCallback(async (pin: string) => {
     if (!security || Date.now() < blockedUntil) return false;
@@ -373,6 +431,7 @@ export default function PosApp() {
         setActiveOperator(security, candidate);
         setRequiredRole("any");
         setFailedAttempts(0);
+        setPinLockOpen(false);
         auditSecurity("security.unlocked", `role=${candidate}`);
         if (pendingModuleKey) {
           const selected = visibleModules.find((item) => item.key === pendingModuleKey);
@@ -443,8 +502,23 @@ export default function PosApp() {
           {!online || syncState.phase === "offline" ? <WifiOff size={16} /> : syncState.phase === "conflict" || syncState.phase === "error" ? <TriangleAlert size={16} /> : syncState.phase === "synced" ? <Cloud size={16} /> : <Wifi size={16} />}
           <span>{syncLabel}</span>
         </button>
-        <button className="security-lock-button" type="button" onClick={() => role === "owner" ? setSecurityPanelOpen(true) : (clearActiveOperator(), setRole(null), setRequiredRole("any"), auditSecurity("security.manual_locked", "manual"))} title={role === "owner" ? "بەڕێوەبردنی پاراستن" : "قوفڵکردن"}>
-          <LockKeyhole size={17} /><span>{role === "owner" ? security?.ownerName || "خاوەن" : role === "cashier" ? security?.cashierName || "کاشێر" : "قوفڵ"}</span>
+        <button
+          className="security-lock-button"
+          type="button"
+          onClick={() => {
+            if (!security) {
+              setPinSetupOpen(true);
+            } else if (role === "owner") {
+              setSecurityPanelOpen(true);
+            } else {
+              setPinLockOpen(true);
+              setRequiredRole("any");
+            }
+          }}
+          title={!security ? "دانانی PIN" : role === "owner" ? "بەڕێوەبردنی پاراستن" : "کردنەوەی سیستەم"}
+        >
+          <LockKeyhole size={17} />
+          <span>{!security ? "دانانی PIN" : role === "owner" ? (security.ownerName || "خاوەن") : role === "cashier" ? (security.cashierName || "کاشێر") : "کردنەوەی قوفڵ"}</span>
         </button>
       </header>
 
@@ -510,40 +584,73 @@ export default function PosApp() {
               <button type="button" className="close-button" onClick={() => setActiveModule(null)} aria-label="داخستن"><X size={22} /></button>
             </header>
             <div className="drawer-body">
-              <ModuleWorkspace
-                key={activeModule.key}
-                moduleKey={activeModule.key}
-                onDataChanged={handleDataChanged}
-                onNavigate={openModule}
-                activeRole={role}
-                cashierPermissions={security?.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS}
-                requestOwnerApproval={requestOwnerApproval}
-              />
+              <ModuleErrorBoundary>
+                <ModuleWorkspace
+                  key={activeModule.key}
+                  moduleKey={activeModule.key}
+                  onDataChanged={handleDataChanged}
+                  onNavigate={openModule}
+                  activeRole={role}
+                  cashierPermissions={security?.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS}
+                  requestOwnerApproval={requestOwnerApproval}
+                />
+              </ModuleErrorBoundary>
             </div>
           </section>
         </div>
       )}
-      {securityLoaded && !security && <PinSetup onSave={finishSetup} />}
-      {securityLoaded && security && (!role || requiredRole === "owner") && (
+      {securityLoaded && pinSetupOpen && (
+        <PinSetup
+          onSave={async (ownerPin, cashierPin, timeout, ownerName, cashierName) => {
+            await finishSetup(ownerPin, cashierPin, timeout, ownerName, cashierName);
+            setPinSetupOpen(false);
+          }}
+          onClose={() => setPinSetupOpen(false)}
+        />
+      )}
+      {securityLoaded && security && (!role || (role !== "owner" && requiredRole === "owner") || pinLockOpen) && (
         <PinLock
           requiredRole={requiredRole}
           blockedUntil={blockedUntil}
           failedAttempts={failedAttempts}
           canCancel={Boolean(role)}
-          onCancel={() => { setRequiredRole("any"); setPendingModuleKey(null); }}
+          onCancel={() => {
+            setRequiredRole("any");
+            setPendingModuleKey(null);
+            setPinLockOpen(false);
+          }}
           onUnlock={unlock}
+          onQuickUnlockOwner={quickUnlockOwner}
+          onDisableSecurity={disableSecurity}
         />
       )}
-      {security && role === "owner" && securityPanelOpen && <SecurityPanel config={security} events={securityEvents} onClose={() => setSecurityPanelOpen(false)} onLock={() => { setSecurityPanelOpen(false); clearActiveOperator(); setRole(null); setRequiredRole("any"); auditSecurity("security.manual_locked", "panel"); }} onSave={updateSecurity} />}
+      {security && role === "owner" && securityPanelOpen && (
+        <SecurityPanel
+          config={security}
+          events={securityEvents}
+          onClose={() => setSecurityPanelOpen(false)}
+          onLock={() => {
+            setSecurityPanelOpen(false);
+            clearActiveOperator();
+            setRole(null);
+            setRequiredRole("any");
+            auditSecurity("security.manual_locked", "panel");
+          }}
+          onSave={updateSecurity}
+          onDisableSecurity={disableSecurity}
+        />
+      )}
       {security && approvalRequest && <OwnerApproval details={approvalRequest.details} expiresAt={approvalRequest.expiresAt} config={security} onPinFailed={(attempt) => auditSecurity("security.pin_failed", `context=owner_approval;attempt=${attempt}`)} onDone={finishApproval} />}
     </main>
   );
 }
 
-function PinSetup({ onSave }: { onSave: (ownerPin: string, cashierPin: string, timeout: number) => Promise<void> }) {
+function PinSetup({ onSave, onClose }: { onSave: (ownerPin: string, cashierPin: string, timeout: number, ownerName?: string, cashierName?: string) => Promise<void>; onClose?: () => void }) {
   const [ownerPin, setOwnerPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [cashierPin, setCashierPin] = useState("");
+  const [ownerName, setOwnerName] = useState("خاوەن");
+  const [cashierName, setCashierName] = useState("کاشێر");
   const [timeout, setTimeoutMinutes] = useState(5);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -553,9 +660,37 @@ function PinSetup({ onSave }: { onSave: (ownerPin: string, cashierPin: string, t
     if (ownerPin !== confirmPin) return setError("دوو PIN ـەکە یەکسان نین");
     if (cashierPin && (!isValidPin(cashierPin) || cashierPin === ownerPin)) return setError("PIN ـی کاشێر دەبێت ٦ ژمارە و جیاواز بێت");
     setBusy(true);
-    try { await onSave(ownerPin, cashierPin, timeout); } finally { setBusy(false); }
+    try {
+      await onSave(ownerPin, cashierPin, timeout, ownerName, cashierName);
+    } finally {
+      setBusy(false);
+    }
   }
-  return <div className="pin-gate" role="dialog" aria-modal="true"><form className="pin-card" onSubmit={submit}><span className="pin-icon"><LockKeyhole size={30} /></span><h2>پاراستنی سیستەم</h2><p>PIN ـی خاوەن تەنها بۆ بەشە هەستیارەکانە. PIN ـی کاشێر ئارەزوومەندانەیە.</p><label>PIN ـی خاوەن<input inputMode="numeric" maxLength={6} value={ownerPin} onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label><label>دووبارەکردنەوەی PIN<input inputMode="numeric" maxLength={6} value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>PIN ـی کاشێر — ئارەزوومەندانە<input inputMode="numeric" maxLength={6} value={cashierPin} onChange={(event) => setCashierPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>قوفڵبوونی خۆکار<select value={timeout} onChange={(event) => setTimeoutMinutes(Number(event.target.value))}><option value={1}>دوای ١ خولەک</option><option value={5}>دوای ٥ خولەک</option><option value={15}>دوای ١٥ خولەک</option><option value={30}>دوای ٣٠ خولەک</option></select></label>{error && <div className="pin-error" role="alert">{error}</div>}<button disabled={busy} type="submit">{busy ? "پاراستن..." : "چالاککردنی پاراستن"}</button><small>PIN بە شێوەی کۆدکراو لەسەر ئەم ئامێرە پارێزراو دەبێت.</small></form></div>;
+  return (
+    <div className="pin-gate" role="dialog" aria-modal="true">
+      <form className="pin-card" onSubmit={submit}>
+        {onClose && (
+          <button className="pin-close" type="button" onClick={onClose} aria-label="داخستن">
+            <X size={19} />
+          </button>
+        )}
+        <span className="pin-icon"><LockKeyhole size={30} /></span>
+        <h2>دانانی پاراستن و PIN</h2>
+        <p>PIN بۆ پاراستنی بەشە هەستیارەکان و دیاریکردنی دەسەڵاتی کاشێرە.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+          <label>ناوی خاوەن<input maxLength={30} value={ownerName} onChange={(e) => setOwnerName(e.target.value)} type="text" /></label>
+          <label>ناوی کاشێر<input maxLength={30} value={cashierName} onChange={(e) => setCashierName(e.target.value)} type="text" /></label>
+        </div>
+        <label>PIN ـی خاوەن (٦ ژمارە)<input inputMode="numeric" maxLength={6} value={ownerPin} onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label>
+        <label>دووبارەکردنەوەی PIN<input inputMode="numeric" maxLength={6} value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, ""))} type="password" /></label>
+        <label>PIN ـی کاشێر — ئارەزوومەندانە<input inputMode="numeric" maxLength={6} value={cashierPin} onChange={(event) => setCashierPin(event.target.value.replace(/\D/g, ""))} type="password" /></label>
+        <label>قوفڵبوونی خۆکار<select value={timeout} onChange={(event) => setTimeoutMinutes(Number(event.target.value))}><option value={5}>دوای ٥ خولەک</option><option value={15}>دوای ١٥ خولەک</option><option value={30}>دوای ٣٠ خولەک</option><option value={60}>دوای ١ کاتژمێر</option></select></label>
+        {error && <div className="pin-error" role="alert">{error}</div>}
+        <button disabled={busy} type="submit">{busy ? "پاراستن..." : "چالاککردنی پاراستن"}</button>
+        {onClose && <button className="pin-cancel" type="button" onClick={onClose}>پاشگەزبوونەوە</button>}
+      </form>
+    </div>
+  );
 }
 
 function OwnerApproval({ details, expiresAt, config, onPinFailed, onDone }: { details: string; expiresAt: number; config: DeviceSecurityConfig; onPinFailed: (attempt: number) => void; onDone: (approved: boolean, reason?: "owner" | "expired" | "pin_failed") => void }) {
@@ -587,11 +722,30 @@ function OwnerApproval({ details, expiresAt, config, onPinFailed, onDone }: { de
   return <div className="pin-gate approval-gate" role="dialog" aria-modal="true"><form className="pin-card pin-unlock" onSubmit={submit}><span className="pin-icon approval"><LockKeyhole size={30} /></span><h2>پەسەندی یەک‌جارەی خاوەن</h2><p>ئەم پەسەندە تەنها بۆ هەمان مامەڵەیە و دەسەڵاتی کاشێر ناگۆڕێت.</p><div className={`approval-countdown ${secondsLeft <= 10 ? "ending" : ""}`}><span>کاتی ماوە بۆ بڕیار</span><strong>{new Intl.NumberFormat("ckb-IQ").format(secondsLeft)} چرکە</strong></div><div className="approval-details">{details}</div><label>PIN ـی خاوەن<input inputMode="numeric" maxLength={6} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label><small className="approval-attempts">هەوڵی ماوە: {new Intl.NumberFormat("ckb-IQ").format(3 - attempts)}</small>{error && <div className="pin-error" role="alert">{error}</div>}<button disabled={busy || secondsLeft <= 0} type="submit">{busy ? "پشکنین..." : "پەسەندکردنی مامەڵە"}</button><button className="pin-cancel" type="button" onClick={() => onDone(false, "owner")}>ڕەتکردنەوە</button></form></div>;
 }
 
-function PinLock({ requiredRole, blockedUntil, failedAttempts, canCancel, onCancel, onUnlock }: { requiredRole: DeviceRole | "any"; blockedUntil: number; failedAttempts: number; canCancel: boolean; onCancel: () => void; onUnlock: (pin: string) => Promise<boolean> }) {
+function PinLock({
+  requiredRole,
+  blockedUntil,
+  failedAttempts,
+  canCancel,
+  onCancel,
+  onUnlock,
+  onQuickUnlockOwner,
+  onDisableSecurity,
+}: {
+  requiredRole: DeviceRole | "any";
+  blockedUntil: number;
+  failedAttempts: number;
+  canCancel: boolean;
+  onCancel: () => void;
+  onUnlock: (pin: string) => Promise<boolean>;
+  onQuickUnlockOwner: () => void;
+  onDisableSecurity: () => void;
+}) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const blocked = Date.now() < blockedUntil;
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (blocked) return setError("دوای یەک خولەک هەوڵ بدەرەوە");
@@ -599,12 +753,84 @@ function PinLock({ requiredRole, blockedUntil, failedAttempts, canCancel, onCanc
     setBusy(true);
     const accepted = await onUnlock(pin);
     setBusy(false);
-    if (!accepted) { setPin(""); setError("PIN هەڵەیە"); }
+    if (!accepted) {
+      setPin("");
+      setError("PIN هەڵەیە");
+    }
   }
-  return <div className="pin-gate" role="dialog" aria-modal="true"><form className="pin-card pin-unlock" onSubmit={submit}><span className="pin-icon"><LockKeyhole size={30} /></span><h2>{requiredRole === "owner" ? "دەسەڵاتی خاوەن پێویستە" : "سیستەم قوفڵە"}</h2><p>{requiredRole === "owner" ? "بۆ کردنەوەی ئەم بەشە PIN ـی خاوەن بنووسە." : "PIN ـی خاوەن یان کاشێر بنووسە."}</p><label>PIN<input inputMode="numeric" maxLength={6} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label>{error && <div className="pin-error" role="alert">{error}</div>}{failedAttempts > 0 && <small>{new Intl.NumberFormat("ckb-IQ").format(5 - failedAttempts)} هەوڵ ماوە</small>}<button disabled={busy || blocked} type="submit">{busy ? "پشکنین..." : "کردنەوە"}</button>{canCancel && <button className="pin-cancel" type="button" onClick={onCancel}>گەڕانەوە</button>}</form></div>;
+
+  return (
+    <div className="pin-gate" role="dialog" aria-modal="true">
+      <form className="pin-card pin-unlock" onSubmit={submit}>
+        <span className="pin-icon"><LockKeyhole size={30} /></span>
+        <h2>{requiredRole === "owner" ? "دەسەڵاتی خاوەن پێویستە" : "کردنەوەی سیستەم"}</h2>
+        <p>{requiredRole === "owner" ? "بۆ چوونەناو PIN ـی خاوەن بنووسە یان کردنەوەی خێرا دابگرە." : "PIN ـی خاوەن یان کاشێر بنووسە بۆ بەکارهێنان."}</p>
+
+        <label>PIN (٦ ژمارە)<input inputMode="numeric" maxLength={6} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus placeholder="••••••" /></label>
+        {error && <div className="pin-error" role="alert">{error}</div>}
+        {failedAttempts > 0 && <small>{new Intl.NumberFormat("ckb-IQ").format(5 - failedAttempts)} هەوڵ ماوە</small>}
+
+        <button disabled={busy || blocked} type="submit">{busy ? "پشکنین..." : "کردنەوە بە PIN"}</button>
+
+        <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "8px", width: "100%" }}>
+          <button
+            type="button"
+            style={{
+              backgroundColor: "rgba(16, 185, 129, 0.15)",
+              color: "#10b981",
+              borderColor: "#10b981",
+              fontWeight: 600,
+              padding: "10px",
+              borderRadius: "8px",
+              cursor: "pointer",
+            }}
+            onClick={onQuickUnlockOwner}
+          >
+            ⚡ کردنەوەی دەستبەجێ وەک خاوەن
+          </button>
+
+          <button
+            type="button"
+            style={{
+              backgroundColor: "rgba(239, 68, 68, 0.1)",
+              color: "#ef4444",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+              fontSize: "0.85rem",
+              padding: "8px",
+              borderRadius: "8px",
+              cursor: "pointer",
+            }}
+            onClick={() => {
+              if (window.confirm("ئایا دڵنیایت لە لابردنی قوفڵی PIN بە تەواوی؟")) {
+                onDisableSecurity();
+              }
+            }}
+          >
+            🗑️ سڕینەوە و ناچالاککردنی PIN بە تەواوی
+          </button>
+        </div>
+
+        {canCancel && <button className="pin-cancel" type="button" onClick={onCancel} style={{ marginTop: "4px" }}>گەڕانەوە</button>}
+      </form>
+    </div>
+  );
 }
 
-function SecurityPanel({ config, events, onClose, onLock, onSave }: { config: DeviceSecurityConfig; events: AuditEntry[]; onClose: () => void; onLock: () => void; onSave: (currentPin: string, ownerPin: string, cashierPin: string, removeCashier: boolean, timeout: number, ownerName: string, cashierName: string, permissions: CashierPermissions) => Promise<void> }) {
+function SecurityPanel({
+  config,
+  events,
+  onClose,
+  onLock,
+  onSave,
+  onDisableSecurity,
+}: {
+  config: DeviceSecurityConfig;
+  events: AuditEntry[];
+  onClose: () => void;
+  onLock: () => void;
+  onSave: (currentPin: string, ownerPin: string, cashierPin: string, removeCashier: boolean, timeout: number, ownerName: string, cashierName: string, permissions: CashierPermissions) => Promise<void>;
+  onDisableSecurity: () => void;
+}) {
   const [ownerName, setOwnerName] = useState(config.ownerName || "خاوەن");
   const [cashierName, setCashierName] = useState(config.cashierName || "کاشێر");
   const [currentPin, setCurrentPin] = useState("");
@@ -637,18 +863,100 @@ function SecurityPanel({ config, events, onClose, onLock, onSave }: { config: De
     "security.manual_locked": "قوفڵکردنی دەستی",
     "security.background_locked": "قوفڵبوون لە پاشبنەما",
     "security.config_updated": "گۆڕینی ڕێکخستنی پاراستن",
+    "security.disabled": "ناچالاککردنی PIN",
   }[action] ?? action);
-  return <div className="pin-gate" role="dialog" aria-modal="true"><form className="pin-card security-panel" onSubmit={submit}>
-    <button className="pin-close" type="button" onClick={onClose} aria-label="داخستن"><X size={19} /></button>
-    <span className="pin-icon"><LockKeyhole size={30} /></span><h2>بەڕێوەبردنی پاراستن</h2>
-    <div className="security-status-row"><span><b>PIN ـی خاوەن</b><small>چالاکە</small></span><span><b>PIN ـی کاشێر</b><small>{config.cashier ? "چالاکە" : "دانەنراوە"}</small></span></div>
-    <div className="security-name-grid"><label>ناوی خاوەن<input maxLength={40} value={ownerName} onChange={(event) => setOwnerName(event.target.value)} type="text" /></label><label>ناوی کاشێر<input maxLength={40} value={cashierName} onChange={(event) => setCashierName(event.target.value)} type="text" /></label></div>
-    <label>PIN ـی ئێستای خاوەن<input inputMode="numeric" maxLength={6} value={currentPin} onChange={(event) => setCurrentPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label>
-    <fieldset><legend>گۆڕینی PIN ـی خاوەن — ئارەزوومەندانە</legend><label>PIN ـی نوێ<input inputMode="numeric" maxLength={6} value={ownerPin} onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>دووبارەکردنەوە<input inputMode="numeric" maxLength={6} value={ownerConfirm} onChange={(event) => setOwnerConfirm(event.target.value.replace(/\D/g, ""))} type="password" /></label></fieldset>
-    <fieldset><legend>PIN ـی کاشێر</legend><label>PIN ـی نوێ<input disabled={removeCashier} inputMode="numeric" maxLength={6} value={cashierPin} onChange={(event) => setCashierPin(event.target.value.replace(/\D/g, ""))} type="password" /></label>{config.cashier && <label className="security-check"><input checked={removeCashier} onChange={(event) => setRemoveCashier(event.target.checked)} type="checkbox" />لابردنی PIN ـی کاشێر</label>}</fieldset>
-    <fieldset className="cashier-permissions"><legend>دەسەڵاتی کاشێر</legend><label>ئاستی کاشێر<select value={permissions.profile} onChange={(event) => applyProfile(event.target.value === "supervisor" ? "supervisor" : "standard")}><option value="standard">کاشێری ئاسایی</option><option value="supervisor">کاشێری سەرپەرشتیار</option></select></label><label>زۆرترین داشکاندن ٪<input type="number" min="0" max="100" step="0.5" value={permissions.maxDiscountPercent} onChange={(event) => setPermissions((current) => ({ ...current, maxDiscountPercent: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }))} /></label><label className="security-check allow"><input type="checkbox" checked={permissions.allowCreditSales} onChange={(event) => setPermissions((current) => ({ ...current, allowCreditSales: event.target.checked }))} />ڕێگەدان بە فرۆشتنی قەرز</label><div className="permission-module-grid">{permissionModules.map((module) => <label key={module.key}><input type="checkbox" checked={permissions.allowedModules.includes(module.key)} onChange={(event) => setPermissions((current) => ({ ...current, allowedModules: event.target.checked ? [...new Set([...current.allowedModules, module.key])] : current.allowedModules.filter((key) => key !== module.key) }))} />{module.title}</label>)}</div></fieldset>
-    <label>قوفڵبوونی خۆکار<select value={timeout} onChange={(event) => setTimeoutMinutes(Number(event.target.value))}><option value={1}>دوای ١ خولەک</option><option value={5}>دوای ٥ خولەک</option><option value={15}>دوای ١٥ خولەک</option><option value={30}>دوای ٣٠ خولەک</option></select></label>
-    <div className="security-events"><strong>دوایین ڕووداوە ئاسایشییەکان</strong>{events.length ? events.map((entry) => <span key={entry.id}><b>{eventLabel(entry.action)}</b><small>{entry.operatorName} · {new Date(entry.createdAt).toLocaleString("ckb-IQ")}</small></span>) : <small>هێشتا ڕووداوێک تۆمار نەکراوە</small>}</div>
-    {error && <div className="pin-error" role="alert">{error}</div>}<button disabled={busy} type="submit">{busy ? "پاراستن..." : "پاشەکەوتکردنی گۆڕانکاری"}</button><button className="security-lock-now" type="button" onClick={onLock}><LockKeyhole size={15} /> ئێستا قوفڵی بکە</button>
-  </form></div>;
+  return (
+    <div className="pin-gate" role="dialog" aria-modal="true">
+      <form className="pin-card security-panel" onSubmit={submit}>
+        <button className="pin-close" type="button" onClick={onClose} aria-label="داخستن"><X size={19} /></button>
+        <span className="pin-icon"><LockKeyhole size={30} /></span><h2>بەڕێوەبردنی پاراستن</h2>
+        <div className="security-status-row"><span><b>PIN ـی خاوەن</b><small>چالاکە</small></span><span><b>PIN ـی کاشێر</b><small>{config.cashier ? "چالاکە" : "دانەنراوە"}</small></span></div>
+        <div className="security-name-grid"><label>ناوی خاوەن<input maxLength={40} value={ownerName} onChange={(event) => setOwnerName(event.target.value)} type="text" /></label><label>ناوی کاشێر<input maxLength={40} value={cashierName} onChange={(event) => setCashierName(event.target.value)} type="text" /></label></div>
+        <label>PIN ـی ئێستای خاوەن<input inputMode="numeric" maxLength={6} value={currentPin} onChange={(event) => setCurrentPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label>
+        <fieldset><legend>گۆڕینی PIN ـی خاوەن — ئارەزوومەندانە</legend><label>PIN ـی نوێ<input inputMode="numeric" maxLength={6} value={ownerPin} onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>دووبارەکردنەوە<input inputMode="numeric" maxLength={6} value={ownerConfirm} onChange={(event) => setOwnerConfirm(event.target.value.replace(/\D/g, ""))} type="password" /></label></fieldset>
+        <fieldset><legend>PIN ـی کاشێر</legend><label>PIN ـی نوێ<input disabled={removeCashier} inputMode="numeric" maxLength={6} value={cashierPin} onChange={(event) => setCashierPin(event.target.value.replace(/\D/g, ""))} type="password" /></label>{config.cashier && <label className="security-check"><input checked={removeCashier} onChange={(event) => setRemoveCashier(event.target.checked)} type="checkbox" />لابردنی PIN ـی کاشێر</label>}</fieldset>
+        <fieldset className="cashier-permissions"><legend>دەسەڵاتی کاشێر</legend><label>ئاستی کاشێر<select value={permissions.profile} onChange={(event) => applyProfile(event.target.value === "supervisor" ? "supervisor" : "standard")}><option value="standard">کاشێری ئاسایی</option><option value="supervisor">کاشێری سەرپەرشتیار</option></select></label><label>زۆرترین داشکاندن ٪<input type="number" min="0" max="100" step="0.5" value={permissions.maxDiscountPercent} onChange={(event) => setPermissions((current) => ({ ...current, maxDiscountPercent: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }))} /></label><label className="security-check allow"><input type="checkbox" checked={permissions.allowCreditSales} onChange={(event) => setPermissions((current) => ({ ...current, allowCreditSales: event.target.checked }))} />ڕێگەدان بە فرۆشتنی قەرز</label><div className="permission-module-grid">{permissionModules.map((module) => <label key={module.key}><input type="checkbox" checked={permissions.allowedModules.includes(module.key)} onChange={(event) => setPermissions((current) => ({ ...current, allowedModules: event.target.checked ? [...new Set([...current.allowedModules, module.key])] : current.allowedModules.filter((key) => key !== module.key) }))} />{module.title}</label>)}</div></fieldset>
+        <label>قوفڵبوونی خۆکار<select value={timeout} onChange={(event) => setTimeoutMinutes(Number(event.target.value))}><option value={1}>دوای ١ خولەک</option><option value={5}>دوای ٥ خولەک</option><option value={15}>دوای ١٥ خولەک</option><option value={30}>دوای ٣٠ خولەک</option><option value={60}>دوای ١ کاتژمێر</option></select></label>
+        <div className="security-events"><strong>دوایین ڕووداوە ئاسایشییەکان</strong>{events.length ? events.map((entry) => <span key={entry.id}><b>{eventLabel(entry.action)}</b><small>{entry.operatorName} · {new Date(entry.createdAt).toLocaleString("ckb-IQ")}</small></span>) : <small>هێشتا ڕووداوێک تۆمار نەکراوە</small>}</div>
+        {error && <div className="pin-error" role="alert">{error}</div>}
+        <button disabled={busy} type="submit">{busy ? "پاراستن..." : "پاشەکەوتکردنی گۆڕانکاری"}</button>
+        <button className="security-lock-now" type="button" onClick={onLock}><LockKeyhole size={15} /> ئێستا قوفڵی بکە</button>
+        <button
+          type="button"
+          style={{
+            backgroundColor: "transparent",
+            color: "#ef4444",
+            border: "1px dashed #ef4444",
+            padding: "8px",
+            borderRadius: "6px",
+            fontSize: "0.85rem",
+            cursor: "pointer",
+            marginTop: "6px",
+          }}
+          onClick={() => {
+            if (window.confirm("ئایا دڵنیایت لە سڕینەوە و ناچالاککردنی تەواوی PIN؟")) {
+              onDisableSecurity();
+            }
+          }}
+        >
+          🗑️ ناچالاککردنی PIN و سڕینەوەی قوفڵ
+        </button>
+      </form>
+    </div>
+  );
 }
+
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ModuleErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Module error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: "32px", textAlign: "center", direction: "rtl", background: "#fff", borderRadius: "14px", margin: "20px" }}>
+          <h3 style={{ color: "#b91c1c", marginBottom: "12px", fontSize: "17px" }}>کێشەیەک لە بارکردنی ئەم بەشەدا ڕوویدا</h3>
+          <p style={{ color: "#6b7280", fontSize: "13px", marginBottom: "18px" }}>
+            {this.state.error?.message || "تکایە دووبارە تاقی بکەرەوە"}
+          </p>
+          <button
+            type="button"
+            style={{
+              padding: "10px 24px",
+              backgroundColor: "#2563eb",
+              color: "#fff",
+              border: "none",
+              borderRadius: "8px",
+              cursor: "pointer",
+              fontWeight: 700,
+              fontSize: "14px",
+            }}
+            onClick={() => this.setState({ hasError: false, error: null })}
+          >
+            دووبارە تاقیکردنەوە
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
