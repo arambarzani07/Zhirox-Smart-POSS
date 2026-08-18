@@ -1,5 +1,4 @@
 import {
-  singleMarketActor,
   finalizeSyncMutation,
   readCloudSyncDelta,
   readCloudSyncMeta,
@@ -9,6 +8,7 @@ import {
   SyncConflictError,
   SyncMergeConflictError,
 } from "@/db/sync-store";
+import { authenticatedSingleMarketActor } from "@/db/auth-store";
 import { apiSecurityHeaders, apiSecurityResponse, requireAuthenticatedIdentity, requireTrustedMutationRequest } from "@/lib/request-security";
 import { SYNC_STORE_NAMES, type CloudSyncChange } from "@/lib/sync-contract";
 
@@ -29,10 +29,17 @@ function conflictResponse(error: SyncConflictError) {
 }
 
 async function authenticatedActor(request: Request) {
-  // Identity is injected by the trusted Sites/ChatGPT dispatch. Never accept an
-  // email, role, or tenant from request JSON/query parameters.
-  requireAuthenticatedIdentity(request);
-  return singleMarketActor();
+  const identity = requireAuthenticatedIdentity(request);
+  return authenticatedSingleMarketActor(identity);
+}
+
+function accessFailure(error: unknown) {
+  const security = apiSecurityResponse(error);
+  if (security) return security;
+  const message = error instanceof Error ? error.message : "STAFF_ACCESS_DENIED";
+  if (message === "STAFF_ACCESS_DENIED") return json({ error: message }, 403);
+  if (message === "OWNER_EMAIL_NOT_CONFIGURED") return json({ error: message }, 503);
+  return json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
 }
 
 export async function GET(request: Request) {
@@ -40,7 +47,7 @@ export async function GET(request: Request) {
   try {
     actor = await authenticatedActor(request);
   } catch (error) {
-    return apiSecurityResponse(error) ?? json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
+    return accessFailure(error);
   }
   try {
     const params = new URL(request.url).searchParams;
@@ -67,7 +74,7 @@ export async function POST(request: Request) {
     requireTrustedMutationRequest(request);
     actor = await authenticatedActor(request);
   } catch (error) {
-    return apiSecurityResponse(error) ?? json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
+    return accessFailure(error);
   }
 
   const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
