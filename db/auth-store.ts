@@ -83,16 +83,20 @@ async function ensureConfiguredOwner(identity: AuthenticatedIdentity, actorId: s
 
 export async function authenticatedSingleMarketActor(identity: AuthenticatedIdentity): Promise<ServerStaffProfile> {
   await ensureSyncSchema();
+  const ownerEmail = configuredOwnerEmail();
   const actorId = await actorIdForEmail(identity.email);
-  let row = await readStaff(actorId);
 
-  if (!row) row = await ensureConfiguredOwner(identity, actorId);
+  // The configured owner is authoritative even if an older database row exists
+  // with a non-owner role. Always reconcile the configured identity to owner.
+  let row = identity.email === ownerEmail
+    ? await ensureConfiguredOwner(identity, actorId)
+    : await readStaff(actorId);
+
   if (!row) throw new Error("STAFF_ACCESS_DENIED");
   if (row.active !== 1) throw new Error("STAFF_ACCESS_DENIED");
 
-  // Owner identity is anchored to deployment configuration, not request input.
-  // Existing non-owner staff keep only the role already stored in D1.
-  if (row.role === "owner" && identity.email !== configuredOwnerEmail()) {
+  // No other persisted row may retain usable owner authority after rotation.
+  if (row.role === "owner" && identity.email !== ownerEmail) {
     throw new Error("STAFF_ACCESS_DENIED");
   }
 
