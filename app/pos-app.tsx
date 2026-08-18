@@ -319,7 +319,19 @@ export default function PosApp() {
   const openModule = useCallback((key: ModuleKey) => {
     const selected = visibleModules.find((item) => item.key === key);
     if (!selected) return;
-    const cashierAccess = security?.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS;
+
+    // Until PIN security is explicitly configured, this single-device POS runs
+    // as a local owner workspace. Navigation must never dead-end just because a
+    // security profile has not been created yet.
+    if (!security) {
+      setPendingModuleKey(null);
+      setRequiredRole("any");
+      rememberModuleUse(key);
+      setActiveModule(selected);
+      return;
+    }
+
+    const cashierAccess = security.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS;
     if (!role || (role === "cashier" && (!cashierAccess.allowedModules.includes(key) || OWNER_ONLY_MODULES.has(key)))) {
       if (role === "cashier" && dbReady) void recordAuditEvent("permission.denied", key, `profile=${cashierAccess.profile}`);
       setPendingModuleKey(key);
@@ -361,6 +373,7 @@ export default function PosApp() {
     setSecurity(next);
     setRole("owner");
     setActiveOperator(next, "owner");
+    setSecurityPanelOpen(false);
     auditSecurity("security.configured", `timeout=${timeoutMinutes};cashier=${Boolean(cashierPin)}`);
   }, [auditSecurity]);
 
@@ -408,7 +421,17 @@ export default function PosApp() {
     setActiveOperator(next, "owner");
   }, [auditSecurity, security]);
 
-  const requestOwnerApproval = useCallback((details: string) => new Promise<OwnerApprovalDecision>((resolve) => setApprovalRequest({ details, expiresAt: Date.now() + 60_000, resolve })), []);
+  const requestOwnerApproval = useCallback((details: string) => {
+    if (!security) {
+      return Promise.resolve<OwnerApprovalDecision>({
+        approved: true,
+        ownerName: "خاوەن",
+        decidedAt: new Date().toISOString(),
+        reason: "owner",
+      });
+    }
+    return new Promise<OwnerApprovalDecision>((resolve) => setApprovalRequest({ details, expiresAt: Date.now() + 60_000, resolve }));
+  }, [security]);
   const finishApproval = useCallback((approved: boolean, reason: "owner" | "expired" | "pin_failed" = "owner") => {
     setApprovalRequest((current) => { current?.resolve({ approved, ownerName: approved ? security?.ownerName || "خاوەن" : undefined, decidedAt: new Date().toISOString(), reason }); return null; });
   }, [security]);
@@ -443,8 +466,26 @@ export default function PosApp() {
           {!online || syncState.phase === "offline" ? <WifiOff size={16} /> : syncState.phase === "conflict" || syncState.phase === "error" ? <TriangleAlert size={16} /> : syncState.phase === "synced" ? <Cloud size={16} /> : <Wifi size={16} />}
           <span>{syncLabel}</span>
         </button>
-        <button className="security-lock-button" type="button" onClick={() => role === "owner" ? setSecurityPanelOpen(true) : (clearActiveOperator(), setRole(null), setRequiredRole("any"), auditSecurity("security.manual_locked", "manual"))} title={role === "owner" ? "بەڕێوەبردنی پاراستن" : "قوفڵکردن"}>
-          <LockKeyhole size={17} /><span>{role === "owner" ? security?.ownerName || "خاوەن" : role === "cashier" ? security?.cashierName || "کاشێر" : "قوفڵ"}</span>
+        <button
+          className="security-lock-button"
+          type="button"
+          onClick={() => {
+            if (!security) {
+              setSecurityPanelOpen(true);
+              return;
+            }
+            if (role === "owner") {
+              setSecurityPanelOpen(true);
+              return;
+            }
+            clearActiveOperator();
+            setRole(null);
+            setRequiredRole("any");
+            auditSecurity("security.manual_locked", "manual");
+          }}
+          title={!security ? "دانانی PIN" : role === "owner" ? "بەڕێوەبردنی پاراستن" : "قوفڵکردن"}
+        >
+          <LockKeyhole size={17} /><span>{!security ? "دانانی PIN" : role === "owner" ? security.ownerName || "خاوەن" : role === "cashier" ? security.cashierName || "کاشێر" : "قوفڵ"}</span>
         </button>
       </header>
 
@@ -515,7 +556,7 @@ export default function PosApp() {
                 moduleKey={activeModule.key}
                 onDataChanged={handleDataChanged}
                 onNavigate={openModule}
-                activeRole={role}
+                activeRole={role ?? (!security ? "owner" : null)}
                 cashierPermissions={security?.cashierPermissions ?? DEFAULT_CASHIER_PERMISSIONS}
                 requestOwnerApproval={requestOwnerApproval}
               />
@@ -523,7 +564,7 @@ export default function PosApp() {
           </section>
         </div>
       )}
-      {securityLoaded && !security && <PinSetup onSave={finishSetup} />}
+      {securityLoaded && !security && securityPanelOpen && <PinSetup onSave={finishSetup} onClose={() => setSecurityPanelOpen(false)} />}
       {securityLoaded && security && (!role || requiredRole === "owner") && (
         <PinLock
           requiredRole={requiredRole}
@@ -540,7 +581,7 @@ export default function PosApp() {
   );
 }
 
-function PinSetup({ onSave }: { onSave: (ownerPin: string, cashierPin: string, timeout: number) => Promise<void> }) {
+function PinSetup({ onSave, onClose }: { onSave: (ownerPin: string, cashierPin: string, timeout: number) => Promise<void>; onClose: () => void }) {
   const [ownerPin, setOwnerPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [cashierPin, setCashierPin] = useState("");
@@ -555,7 +596,7 @@ function PinSetup({ onSave }: { onSave: (ownerPin: string, cashierPin: string, t
     setBusy(true);
     try { await onSave(ownerPin, cashierPin, timeout); } finally { setBusy(false); }
   }
-  return <div className="pin-gate" role="dialog" aria-modal="true"><form className="pin-card" onSubmit={submit}><span className="pin-icon"><LockKeyhole size={30} /></span><h2>پاراستنی سیستەم</h2><p>PIN ـی خاوەن تەنها بۆ بەشە هەستیارەکانە. PIN ـی کاشێر ئارەزوومەندانەیە.</p><label>PIN ـی خاوەن<input inputMode="numeric" maxLength={6} value={ownerPin} onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label><label>دووبارەکردنەوەی PIN<input inputMode="numeric" maxLength={6} value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>PIN ـی کاشێر — ئارەزوومەندانە<input inputMode="numeric" maxLength={6} value={cashierPin} onChange={(event) => setCashierPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>قوفڵبوونی خۆکار<select value={timeout} onChange={(event) => setTimeoutMinutes(Number(event.target.value))}><option value={1}>دوای ١ خولەک</option><option value={5}>دوای ٥ خولەک</option><option value={15}>دوای ١٥ خولەک</option><option value={30}>دوای ٣٠ خولەک</option></select></label>{error && <div className="pin-error" role="alert">{error}</div>}<button disabled={busy} type="submit">{busy ? "پاراستن..." : "چالاککردنی پاراستن"}</button><small>PIN بە شێوەی کۆدکراو لەسەر ئەم ئامێرە پارێزراو دەبێت.</small></form></div>;
+  return <div className="pin-gate" role="dialog" aria-modal="true"><form className="pin-card" onSubmit={submit}><button className="pin-close" type="button" onClick={onClose} aria-label="داخستن"><X size={19} /></button><span className="pin-icon"><LockKeyhole size={30} /></span><h2>پاراستنی سیستەم</h2><p>PIN ـی خاوەن تەنها بۆ بەشە هەستیارەکانە. PIN ـی کاشێر ئارەزوومەندانەیە.</p><label>PIN ـی خاوەن<input inputMode="numeric" maxLength={6} value={ownerPin} onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, ""))} type="password" autoFocus /></label><label>دووبارەکردنەوەی PIN<input inputMode="numeric" maxLength={6} value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>PIN ـی کاشێر — ئارەزوومەندانە<input inputMode="numeric" maxLength={6} value={cashierPin} onChange={(event) => setCashierPin(event.target.value.replace(/\D/g, ""))} type="password" /></label><label>قوفڵبوونی خۆکار<select value={timeout} onChange={(event) => setTimeoutMinutes(Number(event.target.value))}><option value={1}>دوای ١ خولەک</option><option value={5}>دوای ٥ خولەک</option><option value={15}>دوای ١٥ خولەک</option><option value={30}>دوای ٣٠ خولەک</option></select></label>{error && <div className="pin-error" role="alert">{error}</div>}<button disabled={busy} type="submit">{busy ? "پاراستن..." : "چالاککردنی پاراستن"}</button><small>PIN بە شێوەی کۆدکراو لەسەر ئەم ئامێرە پارێزراو دەبێت.</small></form></div>;
 }
 
 function OwnerApproval({ details, expiresAt, config, onPinFailed, onDone }: { details: string; expiresAt: number; config: DeviceSecurityConfig; onPinFailed: (attempt: number) => void; onDone: (approved: boolean, reason?: "owner" | "expired" | "pin_failed") => void }) {

@@ -1,5 +1,4 @@
 import {
-  singleMarketActor,
   finalizeSyncMutation,
   readCloudSyncDelta,
   readCloudSyncMeta,
@@ -9,15 +8,16 @@ import {
   SyncConflictError,
   SyncMergeConflictError,
 } from "@/db/sync-store";
+import { authenticatedSingleMarketActor } from "@/db/auth-store";
+import { apiSecurityHeaders, apiSecurityResponse, readBoundedJsonObject, requireAuthenticatedIdentity, requireTrustedMutationRequest } from "@/lib/request-security";
 import { SYNC_STORE_NAMES, type CloudSyncChange } from "@/lib/sync-contract";
 
 export const dynamic = "force-dynamic";
 
 const storeNames = new Set<string>(SYNC_STORE_NAMES);
-const noStoreHeaders = { "Cache-Control": "no-store, private" };
 
 function json(data: unknown, status = 200) {
-  return Response.json(data, { status, headers: noStoreHeaders });
+  return Response.json(data, { status, headers: apiSecurityHeaders });
 }
 
 function conflictResponse(error: SyncConflictError) {
@@ -28,12 +28,26 @@ function conflictResponse(error: SyncConflictError) {
   }, 409);
 }
 
+async function authenticatedActor(request: Request) {
+  const identity = requireAuthenticatedIdentity(request);
+  return authenticatedSingleMarketActor(identity);
+}
+
+function accessFailure(error: unknown) {
+  const security = apiSecurityResponse(error);
+  if (security) return security;
+  const message = error instanceof Error ? error.message : "STAFF_ACCESS_DENIED";
+  if (message === "STAFF_ACCESS_DENIED") return json({ error: message }, 403);
+  if (message === "OWNER_EMAIL_NOT_CONFIGURED") return json({ error: message }, 503);
+  return json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
+}
+
 export async function GET(request: Request) {
   let actor;
   try {
-    actor = await singleMarketActor();
-  } catch {
-    return json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
+    actor = await authenticatedActor(request);
+  } catch (error) {
+    return accessFailure(error);
   }
   try {
     const params = new URL(request.url).searchParams;
@@ -56,19 +70,13 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   let actor;
-  try {
-    actor = await singleMarketActor();
-  } catch {
-    return json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
-  }
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > 1_500_000) return json({ error: "SYNC_PAYLOAD_TOO_LARGE" }, 413);
-
   let body: Record<string, unknown>;
   try {
-    body = await request.json() as Record<string, unknown>;
-  } catch {
-    return json({ error: "INVALID_JSON" }, 400);
+    requireTrustedMutationRequest(request);
+    actor = await authenticatedActor(request);
+    body = await readBoundedJsonObject(request, 1_500_000);
+  } catch (error) {
+    return accessFailure(error);
   }
 
   const action = body.action;

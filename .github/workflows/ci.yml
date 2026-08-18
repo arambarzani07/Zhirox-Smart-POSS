@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - "agent/**"
   pull_request:
     branches:
       - main
@@ -17,9 +18,9 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build and test
+    name: Build, lint, typecheck, test and audit
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -34,8 +35,20 @@ jobs:
       - name: Verify Node.js compatibility
         run: node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 15)) process.exit(1)"
 
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
 
       - name: Build and run tests
         run: npm test
+
+      - name: Validate deployable artifact
+        run: npm run validate:artifact
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high

@@ -10,19 +10,23 @@ const allStores: SyncStoreName[] = [
   "stockAdjustments", "journalEntries", "accounts", "users", "audit", "settings",
 ];
 
+// Cashiers need operational sales/stock/ledger data to complete and synchronize
+// transactions, but they must never receive the users store because user records
+// contain credential-derived fields such as pinHash.
 const cashierRead: SyncStoreName[] = [
   "customers", "products", "stockBatches", "sales", "saleReturns", "cashEntries", "cashShifts",
-  "journalEntries", "users", "audit", "settings",
+  "journalEntries", "audit", "settings",
 ];
 
 const cashierWrite: SyncStoreName[] = [
   "customers", "products", "stockBatches", "sales", "saleReturns", "cashEntries", "cashShifts", "journalEntries", "audit",
 ];
 
+// Accountants can inspect financial and inventory records, but user credentials
+// and account provisioning remain an owner/manager responsibility.
 const accountantRead: SyncStoreName[] = [
   "customers", "suppliers", "products", "stockBatches", "sales", "saleReturns", "purchases", "purchaseReturns",
-  "warranties", "expenses", "cashEntries", "cashShifts", "journalEntries", "accounts", "users", "settings",
-  "audit",
+  "warranties", "expenses", "cashEntries", "cashShifts", "journalEntries", "accounts", "settings", "audit",
 ];
 
 const accountantWrite: SyncStoreName[] = [
