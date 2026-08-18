@@ -1,6 +1,6 @@
-import PosAppV3 from "../../pos-app-v3";
+import ResilientPosRoot from "../../resilient-pos-root";
 
 export default async function ModulePage({ params }: { params: Promise<{ moduleKey: string }> }) {
   const { moduleKey } = await params;
-  return <PosAppV3 initialModuleKey={moduleKey} />;
+  return <ResilientPosRoot initialModuleKey={moduleKey} />;
 }
