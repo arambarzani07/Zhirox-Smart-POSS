@@ -31,16 +31,22 @@ jobs:
           node-version: 22.x
 
       - name: Verify Node.js compatibility
-        run: node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 15)) process.exit(1)"
+        run: node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 15)) { console.error('Zhirox requires Node >=22.15.0; got ' + process.versions.node); process.exit(1); }"
 
+      # This repository currently has no committed package-lock.json. npm ci and
+      # setup-node's npm cache both require a lockfile, so use a clean npm install
+      # until the dependency graph is intentionally locked and committed.
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
       - name: Lint
         run: npm run lint
 
-      - name: Build
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build Next standalone
         run: npm run build
 
-      - name: Test
+      - name: Run regression tests
         run: npm test
