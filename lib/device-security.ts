@@ -47,15 +47,28 @@ async function createCredential(pin: string): Promise<PinCredential> {
   return { salt: toBase64(salt), hash: await derivePin(pin, salt) };
 }
 
+/**
+ * Device PIN security has been retired from the POS UI.
+ * Existing locally stored PIN credentials are removed on load so devices
+ * immediately return to the always-open local owner workspace.
+ * Server-side authentication/authorization is intentionally unaffected.
+ */
 export function loadDeviceSecurity(): DeviceSecurityConfig | null {
   try {
-    const parsed = JSON.parse(localStorage.getItem(SECURITY_KEY) ?? "null") as DeviceSecurityConfig | null;
-    return parsed?.version === 1 && parsed.owner?.hash ? parsed : null;
+    localStorage.removeItem(SECURITY_KEY);
+    sessionStorage.removeItem("zhirox.security-blocked-until");
+    sessionStorage.setItem("zhirox.active-operator.v1", JSON.stringify({
+      id: "device-owner",
+      role: "owner",
+      name: "خاوەن",
+    }));
   } catch {
-    return null;
+    // Storage cleanup is best effort. PIN remains disabled regardless.
   }
+  return null;
 }
 
+/** @deprecated Device PIN setup is disabled. Kept temporarily for source compatibility. */
 export async function createDeviceSecurity(ownerPin: string, cashierPin: string, timeoutMinutes = 5, ownerName = "خاوەن", cashierName = "کاشێر") {
   const config: DeviceSecurityConfig = {
     version: 1,
@@ -67,10 +80,11 @@ export async function createDeviceSecurity(ownerPin: string, cashierPin: string,
     cashierPermissions: DEFAULT_CASHIER_PERMISSIONS,
     updatedAt: new Date().toISOString(),
   };
-  localStorage.setItem(SECURITY_KEY, JSON.stringify(config));
+  // Do not persist: PIN security has been disabled for this application.
   return config;
 }
 
+/** @deprecated Device PIN setup is disabled. Kept temporarily for source compatibility. */
 export async function updateDeviceSecurity(
   config: DeviceSecurityConfig,
   currentOwnerPin: string,
@@ -89,8 +103,8 @@ export async function updateDeviceSecurity(
     : newCashierPin
       ? await createCredential(newCashierPin)
       : config.cashier;
-  const next: DeviceSecurityConfig = {
-    version: 1,
+  return {
+    version: 1 as const,
     owner,
     ...(cashier ? { cashier } : {}),
     timeoutMinutes,
@@ -99,8 +113,6 @@ export async function updateDeviceSecurity(
     cashierPermissions,
     updatedAt: new Date().toISOString(),
   };
-  localStorage.setItem(SECURITY_KEY, JSON.stringify(next));
-  return next;
 }
 
 export async function verifyDevicePin(config: DeviceSecurityConfig, role: DeviceRole, pin: string) {
@@ -134,7 +146,12 @@ export function clearActiveOperator() {
 export function removeDeviceSecurity() {
   try {
     localStorage.removeItem(SECURITY_KEY);
-    sessionStorage.removeItem("zhirox.active-operator.v1");
+    sessionStorage.removeItem("zhirox.security-blocked-until");
+    sessionStorage.setItem("zhirox.active-operator.v1", JSON.stringify({
+      id: "device-owner",
+      role: "owner",
+      name: "خاوەن",
+    }));
   } catch {
     // storage cleanup is best effort
   }
