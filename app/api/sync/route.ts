@@ -9,15 +9,15 @@ import {
   SyncConflictError,
   SyncMergeConflictError,
 } from "@/db/sync-store";
+import { apiSecurityHeaders, apiSecurityResponse, requireAuthenticatedIdentity, requireTrustedMutationRequest } from "@/lib/request-security";
 import { SYNC_STORE_NAMES, type CloudSyncChange } from "@/lib/sync-contract";
 
 export const dynamic = "force-dynamic";
 
 const storeNames = new Set<string>(SYNC_STORE_NAMES);
-const noStoreHeaders = { "Cache-Control": "no-store, private" };
 
 function json(data: unknown, status = 200) {
-  return Response.json(data, { status, headers: noStoreHeaders });
+  return Response.json(data, { status, headers: apiSecurityHeaders });
 }
 
 function conflictResponse(error: SyncConflictError) {
@@ -28,12 +28,19 @@ function conflictResponse(error: SyncConflictError) {
   }, 409);
 }
 
+async function authenticatedActor(request: Request) {
+  // Identity is injected by the trusted Sites/ChatGPT dispatch. Never accept an
+  // email, role, or tenant from request JSON/query parameters.
+  requireAuthenticatedIdentity(request);
+  return singleMarketActor();
+}
+
 export async function GET(request: Request) {
   let actor;
   try {
-    actor = await singleMarketActor();
-  } catch {
-    return json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
+    actor = await authenticatedActor(request);
+  } catch (error) {
+    return apiSecurityResponse(error) ?? json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
   }
   try {
     const params = new URL(request.url).searchParams;
@@ -57,12 +64,20 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   let actor;
   try {
-    actor = await singleMarketActor();
-  } catch {
-    return json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
+    requireTrustedMutationRequest(request);
+    actor = await authenticatedActor(request);
+  } catch (error) {
+    return apiSecurityResponse(error) ?? json({ error: "SINGLE_MARKET_UNAVAILABLE" }, 503);
   }
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > 1_500_000) return json({ error: "SYNC_PAYLOAD_TOO_LARGE" }, 413);
+
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") return json({ error: "CONTENT_TYPE_JSON_REQUIRED" }, 415);
+  const lengthHeader = request.headers.get("content-length");
+  if (lengthHeader) {
+    const length = Number(lengthHeader);
+    if (!Number.isFinite(length) || length < 0) return json({ error: "INVALID_CONTENT_LENGTH" }, 400);
+    if (length > 1_500_000) return json({ error: "SYNC_PAYLOAD_TOO_LARGE" }, 413);
+  }
 
   let body: Record<string, unknown>;
   try {
