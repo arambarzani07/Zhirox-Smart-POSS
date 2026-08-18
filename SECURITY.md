@@ -1,29 +1,35 @@
 # Zhirox Smart POS Security Baseline
 
-## Production identity boundary
+## Production identity
 
-The sync and production APIs require the hosting dispatch to inject `oai-authenticated-user-email`. Client JSON, query parameters, cookies created by the app, and browser-local role state are never accepted as server identity, tenant, or role authority.
+All cloud sync and production-control API routes require the trusted hosting identity header injected by the deployment platform. The browser must never choose its own role, tenant, email, or owner status in JSON, query parameters, local storage, or custom headers.
 
-## Owner configuration
+## Owner authority
 
-Production must define `ZHIROX_OWNER_EMAIL` as the normalized email address of the single-market owner. The server fails closed with `OWNER_EMAIL_NOT_CONFIGURED` when an unknown identity needs owner bootstrap and this value is absent or invalid.
+`ZHIROX_OWNER_EMAIL` is deployment-only configuration and is the canonical owner identity for the single-market installation. It must be configured in the runtime environment, never committed to Git, and never exposed to client-side code. When the configured owner changes, stale active owner rows are disabled before the new configured owner is provisioned, preserving a single active owner identity.
 
-The configured owner can be inserted into `pos_staff` automatically on first authenticated request. Existing non-owner staff are authorized only from their persisted `pos_staff` row. An authenticated user who is not configured as owner and does not have an active staff row receives `STAFF_ACCESS_DENIED`.
+## Staff authorization
 
-Never place `ZHIROX_OWNER_EMAIL` in browser code or accept an owner email from request JSON. Configure it only in the deployment/runtime environment.
+Non-owner staff must already exist as active records in `pos_staff`. Unknown, inactive, or stale owner identities fail closed. Roles come only from persisted server-side data. The API must not accept a role or tenant from an untrusted request.
 
-## State-changing requests
+Credential-derived user records are privileged data. The cloud `users` store is readable only by owner/manager roles; cashier and accountant cloud scopes must not include it.
 
-`POST /api/sync` and `POST /api/production` reject cross-origin/cross-site browser requests, require JSON content type, validate content length, and return no-store security-hardened responses.
+## Mutation protection
 
-## Restore
+State-changing API calls are same-origin/same-site only, require authenticated server identity, require JSON where applicable, and enforce body-size limits using the actual received bytes rather than trusting `Content-Length` alone.
 
-Cloud revision restore is owner-only. A staff identity with any other role receives `RESTORE_OWNER_REQUIRED`.
+## Restore protection
 
-## CI gate
+Cloud restore is an owner-only production operation. A normal authenticated staff identity is insufficient.
 
-The CI gate runs locked dependency installation, lint, build/tests, artifact validation, and a high-severity production dependency audit. Security-sensitive changes should not be merged until this gate succeeds.
+## CI merge gate
 
-## Remaining architectural rule
+Before production merge, CI should pass locked dependency installation, ESLint, strict TypeScript typechecking, build/tests, deployable artifact validation, and the production dependency audit. Security-hardening changes remain draft until these checks are green.
 
-Server authorization must remain authoritative. New APIs must resolve identity through the same authenticated staff boundary and must never call the legacy `singleMarketActor()` helper directly. New roles must be read from persisted server state, never from client-submitted role values.
+## Operational rules
+
+- Never commit secrets, owner email configuration, tokens, or production database credentials.
+- Never trust browser-provided authorization metadata.
+- Keep D1 backups/restore points available before risky migrations.
+- Review role store scopes whenever a new synchronized data store is introduced.
+- Treat any new endpoint that changes stock, money, staff, permissions, settings, or restore state as a privileged mutation requiring explicit server authorization.
