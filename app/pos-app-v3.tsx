@@ -9,8 +9,8 @@ import {
   Store, Truck, TriangleAlert, UsersRound, X, type LucideIcon,
 } from "lucide-react";
 import { Component, useCallback, useEffect, useMemo, useState, type ErrorInfo, type MouseEvent, type ReactNode } from "react";
-import { countStores, ensureJournalOpeningSnapshot, getRecord, openPosDatabase, type PosSettings, type StoreCounts } from "@/lib/pos-db";
 import { DEFAULT_CASHIER_PERMISSIONS } from "@/lib/device-security";
+import type { PosSettings, StoreCounts } from "@/lib/pos-db";
 import type { OwnerApprovalDecision, WorkspaceModuleKey } from "./module-workspace";
 
 const ModuleWorkspace = dynamic(() => import("./module-workspace"), {
@@ -79,19 +79,29 @@ let memoryStorageInstalled = false;
 function installMemoryIndexedDb() {
   if (typeof window === "undefined") return false;
   if (memoryStorageInstalled) return true;
-  try {
+  const install = () => {
     Object.defineProperty(globalThis, "indexedDB", { configurable: true, writable: true, value: memoryIndexedDB });
     Object.defineProperty(globalThis, "IDBKeyRange", { configurable: true, writable: true, value: MemoryIDBKeyRange });
+  };
+  try {
+    install();
     memoryStorageInstalled = true;
     return true;
-  } catch (error) {
-    console.error("Unable to install preview IndexedDB fallback", error);
-    return false;
+  } catch (firstError) {
+    try {
+      (globalThis as typeof globalThis & { indexedDB: IDBFactory }).indexedDB = memoryIndexedDB;
+      (globalThis as typeof globalThis & { IDBKeyRange: typeof IDBKeyRange }).IDBKeyRange = MemoryIDBKeyRange;
+      memoryStorageInstalled = true;
+      return true;
+    } catch (secondError) {
+      console.error("Unable to install preview IndexedDB fallback", firstError, secondError);
+      return false;
+    }
   }
 }
 
-// Install the fallback synchronously during client module evaluation. This avoids
-// waiting for a dynamic import inside useEffect, which can stall in embedded iOS previews.
+// Embedded iOS previews may expose an IndexedDB object that never settles.
+// Replace it synchronously before any database runtime is imported.
 if (typeof window !== "undefined" && isEmbeddedPreview()) installMemoryIndexedDb();
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
@@ -152,7 +162,12 @@ export default function PosAppV3({ initialModuleKey }: { initialModuleKey?: stri
   const [activeModule, setActiveModule] = useState<ModuleDefinition | null>(() => moduleForKey(initialModuleKey));
 
   const refreshCounts = useCallback(async () => {
-    const [nextCounts, nextSettings] = await Promise.all([countStores(), getRecord<PosSettings>("settings", "main")]);
+    const db = await withTimeout(import("@/lib/pos-db"), 3000, "LOCAL_DB_CHUNK_TIMEOUT");
+    const [nextCounts, nextSettings] = await withTimeout(
+      Promise.all([db.countStores(), db.getRecord<PosSettings>("settings", "main")]),
+      3000,
+      "LOCAL_DB_READ_TIMEOUT",
+    );
     setCounts(nextCounts);
     setSettings(nextSettings ?? null);
   }, []);
@@ -177,9 +192,10 @@ export default function PosAppV3({ initialModuleKey }: { initialModuleKey?: stri
           }
         }
 
-        await withTimeout(openPosDatabase(), 3000, "LOCAL_DB_OPEN_TIMEOUT");
-        await withTimeout(ensureJournalOpeningSnapshot(), 3000, "LOCAL_DB_INIT_TIMEOUT");
-        await withTimeout(refreshCounts(), 3000, "LOCAL_DB_READ_TIMEOUT");
+        const db = await withTimeout(import("@/lib/pos-db"), 3000, "LOCAL_DB_CHUNK_TIMEOUT");
+        await withTimeout(db.openPosDatabase(), 3000, "LOCAL_DB_OPEN_TIMEOUT");
+        await withTimeout(db.ensureJournalOpeningSnapshot(), 3000, "LOCAL_DB_INIT_TIMEOUT");
+        await refreshCounts();
 
         if (!cancelled) {
           setStorageStatus(mode);
