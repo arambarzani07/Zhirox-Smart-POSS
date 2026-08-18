@@ -16,9 +16,11 @@ export const DEFAULT_CASHIER_PERMISSIONS: CashierPermissions = {
   allowCreditSales: false,
 };
 
+type RetiredCredential = { salt: string; hash: string };
+
 /**
  * Compatibility-only shape for legacy imports. Device PIN authentication is
- * permanently retired; no credential material is created or persisted.
+ * permanently retired; owner/cashier credential fields are never populated.
  */
 export type DeviceSecurityConfig = {
   version: 2;
@@ -27,6 +29,8 @@ export type DeviceSecurityConfig = {
   cashierName: string;
   cashierPermissions: CashierPermissions;
   retired: true;
+  owner?: RetiredCredential;
+  cashier?: RetiredCredential;
 };
 
 const SECURITY_KEY = "zhirox.device-security.v1";
@@ -92,6 +96,8 @@ export async function updateDeviceSecurity(
     cashierName: cashierName.trim() || config.cashierName || "کاشێر",
     cashierPermissions,
     retired: true,
+    owner: undefined,
+    cashier: undefined,
   };
 }
 
