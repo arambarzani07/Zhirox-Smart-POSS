@@ -58,16 +58,26 @@ async function readStaff(actorId: string) {
 async function ensureConfiguredOwner(identity: AuthenticatedIdentity, actorId: string) {
   if (identity.email !== configuredOwnerEmail()) return null;
   const now = new Date().toISOString();
-  await database().prepare(`INSERT INTO pos_staff
-      (tenant_id, actor_id, email, display_name, role, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'owner', 1, ?, ?)
-    ON CONFLICT (tenant_id, actor_id) DO UPDATE SET
-      email = excluded.email,
-      display_name = excluded.display_name,
-      role = 'owner',
-      active = 1,
-      updated_at = excluded.updated_at`)
-    .bind(TENANT_ID, actorId, identity.email, identity.displayName, now, now).run();
+  const db = database();
+
+  // Runtime configuration is the canonical owner authority. When the configured
+  // owner changes, disable stale owner rows before provisioning the new owner so
+  // there can never be two active owner identities for this single-market tenant.
+  await db.batch([
+    db.prepare(`UPDATE pos_staff SET active = 0, updated_at = ?
+      WHERE tenant_id = ? AND role = 'owner' AND actor_id <> ? AND active = 1`)
+      .bind(now, TENANT_ID, actorId),
+    db.prepare(`INSERT INTO pos_staff
+        (tenant_id, actor_id, email, display_name, role, active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'owner', 1, ?, ?)
+      ON CONFLICT (tenant_id, actor_id) DO UPDATE SET
+        email = excluded.email,
+        display_name = excluded.display_name,
+        role = 'owner',
+        active = 1,
+        updated_at = excluded.updated_at`)
+      .bind(TENANT_ID, actorId, identity.email, identity.displayName, now, now),
+  ]);
   return readStaff(actorId);
 }
 
